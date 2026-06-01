@@ -154,62 +154,12 @@ pub const BmpDecoder = struct {
         };
     }
 
-    /// Decode a MASK sprite (AssetMapMaskUp/Down, SpriteTypeMask).
-    /// Format (freeserf `SpriteDosMask`): after the 10-byte header, RLE pairs of
-    /// (drop, fill) — `drop` transparent pixels followed by `fill` opaque pixels.
-    /// No palette indices are stored. Opaque pixels become white (alpha 255),
-    /// transparent become alpha 0, so the result is a 1-bit stencil usable as a
-    /// shader alpha mask.
-    pub fn decodeMask(self: *BmpDecoder, data: []const u8) !Sprite {
-        if (data.len < 10) return error.InvalidSprite;
-
-        const delta_x: i8 = @bitCast(data[0]);
-        const delta_y: i8 = @bitCast(data[1]);
-        const width: u32 = std.mem.readInt(u16, data[2..4], .little);
-        const height: u32 = std.mem.readInt(u16, data[4..6], .little);
-        const offset_x: i16 = std.mem.readInt(i16, data[6..8], .little);
-        const offset_y: i16 = std.mem.readInt(i16, data[8..10], .little);
-
-        if (width == 0 or height == 0) return error.InvalidSpriteSize;
-        if (width > 2048 or height > 2048) return error.InvalidSpriteSize;
-
-        const pixel_count = width * height;
-        const pixels = try self.allocator.alloc(ColorRGBA, pixel_count);
-        errdefer self.allocator.free(pixels);
-        @memset(pixels, ColorRGBA{ .r = 0, .g = 0, .b = 0, .a = 0 });
-
-        const raw = data[10..];
-        var pos: usize = 0;
-        var i: usize = 0;
-        while (i + 1 < raw.len and pos < pixel_count) {
-            const drop = raw[i];
-            const fill = raw[i + 1];
-            i += 2;
-            pos += drop; // transparent run
-            for (0..fill) |_| {
-                if (pos >= pixel_count) break;
-                pixels[pos] = .{ .r = 255, .g = 255, .b = 255, .a = 255 };
-                pos += 1;
-            }
-        }
-
-        return .{
-            .width = width,
-            .height = height,
-            .delta_x = delta_x,
-            .delta_y = delta_y,
-            .offset_x = offset_x,
-            .offset_y = offset_y,
-            .pixels = pixels,
-        };
-    }
-
     /// Decode an OVERLAY sprite (AssetMapShadow / AssetSerfShadow, SpriteTypeOverlay).
-    /// Same RLE structure as `decodeMask` (freeserf `SpriteDosOverlay`): after the
-    /// 10-byte header, pairs of (drop, fill) — `drop` transparent pixels then `fill`
-    /// shadow pixels. The original fills with palette[0x80] at alpha 0x80; we emit a
-    /// flat semi-transparent black (0,0,0,128), which under GL_SRC_ALPHA blending
-    /// darkens the terrain underneath by ~50% — the shadow effect.
+    /// Format (freeserf `SpriteDosOverlay`): after the 10-byte header, RLE pairs of
+    /// (drop, fill) — `drop` transparent pixels then `fill` shadow pixels. The
+    /// original fills with palette[0x80] at alpha 0x80; we emit a flat
+    /// semi-transparent black (0,0,0,128), which under GL_SRC_ALPHA blending darkens
+    /// the terrain underneath by ~50% — the shadow effect.
     pub fn decodeOverlay(self: *BmpDecoder, data: []const u8) !Sprite {
         if (data.len < 10) return error.InvalidSprite;
 

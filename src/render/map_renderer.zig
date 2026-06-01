@@ -30,65 +30,15 @@ pub const TileHeight: f32 = 20.0;
 /// First PAK index of the 32×20 terrain sprites (C++ AssetMapGround base).
 pub const TERRAIN_SPRITE_BASE: u16 = 260;
 
-/// Height-mask lookup table for the up-pointing triangle (from C++ viewport.cc tri_mask[]).
-/// Index = 4 + (m - left) + 9 * (4 + (m - right)), clamped to [0,8] each axis.
-/// Returns sprite variant 0-7, or -1 for invalid combinations.
-const TRI_MASK_UP = [81]i8{
-     0,  1,  3,  6,  7, -1, -1, -1, -1,
-     0,  1,  2,  5,  6,  7, -1, -1, -1,
-     0,  1,  2,  3,  5,  6,  7, -1, -1,
-     0,  1,  2,  3,  4,  5,  6,  7, -1,
-     0,  1,  2,  3,  4,  4,  5,  6,  7,
-    -1,  0,  1,  2,  3,  4,  5,  6,  7,
-    -1, -1,  0,  1,  2,  4,  5,  6,  7,
-    -1, -1, -1,  0,  1,  2,  5,  6,  7,
-    -1, -1, -1, -1,  0,  1,  4,  6,  7,
-};
+/// The flat (level-ground) sprite variant. One uniform sprite per terrain type;
+/// relief is conveyed by per-vertex shading, not by per-tile slope sprites.
+const FLAT_VARIANT: u16 = 4;
 
-/// Height-mask lookup table for the down-pointing triangle (viewport.cc tri_mask[]).
-const TRI_MASK_DOWN = [81]i8{
-     0,  0,  0,  0,  0, -1, -1, -1, -1,
-     1,  1,  1,  1,  1,  0, -1, -1, -1,
-     3,  2,  2,  2,  2,  1,  0, -1, -1,
-     6,  5,  3,  3,  3,  2,  1,  0, -1,
-     7,  6,  5,  4,  4,  3,  2,  1,  0,
-    -1,  7,  6,  5,  4,  4,  4,  2,  1,
-    -1, -1,  7,  6,  5,  5,  5,  5,  4,
-    -1, -1, -1,  7,  6,  6,  6,  6,  6,
-    -1, -1, -1, -1,  7,  7,  7,  7,  7,
-};
-
-/// Raw slope-mask index (0-80) from height deltas, clamped so each axis ∈ [0,8].
-/// `up=true` uses the up-triangle formula (4+m-left, 4+m-right), else the
-/// down-triangle formula (4+left-m, 4+right-m).
-fn maskIndex(m: i32, left: i32, right: i32, up: bool) usize {
-    const a: i32 = if (up) (m - left) else (left - m);
-    const b: i32 = if (up) (m - right) else (right - m);
-    const ca: usize = @intCast(@max(0, @min(8, 4 + a)));
-    const cb: usize = @intCast(@max(0, @min(8, 4 + b)));
-    return ca + 9 * cb;
-}
-
-/// Ground sprite variant (0-7) for a slope-mask index via the tri_mask tables.
-fn variantFor(mask_idx: usize, up: bool) u16 {
-    const v = if (up) TRI_MASK_UP[mask_idx] else TRI_MASK_DOWN[mask_idx];
-    if (v >= 0) return @intCast(v);
-    return 4; // flat fallback
-}
-
-/// Compute the height-variant sprite index (0-7) — kept for the colour-fallback path.
-fn heightVariant(m: i32, left: i32, right: i32) u16 {
-    return variantFor(maskIndex(m, left, right, true), true);
-}
-
-/// Map terrain type + height variant (0-7) to a PAK sprite index.
-/// tri_spr[] groups (C++ AssetMapGround, base PAK 260):
-///   Water  → offset 32 (PAK 292) — single sprite, variant ignored
-///   Grass  → offsets  0-7  (PAK 260-267)
-///   Tundra → offsets  8-15 (PAK 268-275)
-///   Snow   → offsets 16-23 (PAK 276-283)
-///   Desert → offsets 24-31 (PAK 284-291)
-fn terrainSpriteId(t: Terrain, variant: u16) ?u16 {
+/// Map terrain type to its flat (variant 4) ground sprite PAK index. Terrain is
+/// drawn with one uniform sprite per type; relief comes from per-vertex shading.
+/// tri_spr[] groups (C++ AssetMapGround, base PAK 260): Grass 260-267,
+/// Tundra 268-275, Snow 276-283, Desert 284-291; Water uses offset 32 (PAK 292).
+fn terrainSpriteId(t: Terrain) ?u16 {
     const base: u16 = switch (t) {
         .water  => return TERRAIN_SPRITE_BASE + 32,
         .grass  => 0,
@@ -98,7 +48,7 @@ fn terrainSpriteId(t: Terrain, variant: u16) ?u16 {
         // Not in original C++ terrain enum — no sprites available.
         .swamp, .lava, .mountain, .mountain2, .mountain_mined, .mountain_flagged => return null,
     };
-    return TERRAIN_SPRITE_BASE + base + @min(variant, 7);
+    return TERRAIN_SPRITE_BASE + base + FLAT_VARIANT;
 }
 
 /// Fallback solid color when no atlas sprite is available.
@@ -131,6 +81,35 @@ fn heightAt(map: *Map, x: usize, y: usize) f32 {
     return @floatFromInt(map.getTileXY(xx, yy).height);
 }
 
+// Directional-light shading constants. Light from the upper-left.
+const SHADE_AMBIENT: f32 = 0.92;
+const SHADE_DIFFUSE: f32 = 0.13;
+const SHADE_LX: f32 = 1.0;
+const SHADE_LY: f32 = 1.0;
+const SHADE_MIN: f32 = 0.6;
+const SHADE_MAX: f32 = 1.25;
+
+/// Per-vertex brightness multiplier from the local height gradient (slope) dotted
+/// with a fixed light direction. Flat ground → ~SHADE_AMBIENT; slopes facing the
+/// light brighten, slopes facing away darken — the shaded-relief effect.
+fn shadeAt(map: *Map, x: usize, y: usize) f32 {
+    const xl = if (x > 0) x - 1 else x;
+    const yu = if (y > 0) y - 1 else y;
+    const dhx = heightAt(map, x + 1, y) - heightAt(map, xl, y);
+    const dhy = heightAt(map, x, y + 1) - heightAt(map, x, yu);
+    const ndl = SHADE_LX * (-dhx) + SHADE_LY * (-dhy);
+    return @max(SHADE_MIN, @min(SHADE_MAX, SHADE_AMBIENT + SHADE_DIFFUSE * ndl));
+}
+
+/// Per-vertex tint (v_color.rgb). The shader does `mix(tint, px*tint, ca)`, so for
+/// a textured tile (ca=1) the tint is the brightness applied to the sprite → grey
+/// `(s,s,s)`; for a sprite-less tile (water, ca=0) the tint is the flat fallback
+/// colour scaled by the brightness.
+fn cornerTint(fb: [4]f32, ca: f32, s: f32) [3]f32 {
+    if (ca > 0.5) return .{ s, s, s };
+    return .{ fb[0] * s, fb[1] * s, fb[2] * s };
+}
+
 /// True if tile (x,y) borders a tile of a different terrain type (any of the 8
 /// neighbours). Such tiles get the dithered overlay so transitions are stippled;
 /// interior uniform tiles render only the clean solid base.
@@ -150,66 +129,14 @@ fn isTerrainBoundary(map: *Map, x: usize, y: usize) bool {
     return false;
 }
 
-/// Atlas region + pixel size + hotspot offset of a mask sprite.
-const MaskRegion = struct {
-    u: f32 = 0, v: f32 = 0, uw: f32 = 0, vh: f32 = 0,
-    w: f32 = 32, h: f32 = 25, ox: f32 = 0, oy: f32 = 0,
-};
-
-/// Look up a mask sprite (by PAK id) in the atlas, falling back to the flat mask.
-/// Returns a zero-region (→ samples the white atlas origin, no discard) when the
-/// atlas or sprite is unavailable.
-fn maskRegion(atlas: ?*TextureAtlas, pak_id: u16, fallback: u16) MaskRegion {
-    if (atlas) |a| {
-        const e = a.get(pak_id) orelse a.get(fallback) orelse return .{};
-        return .{
-            .u = e.u, .v = e.v, .uw = e.uw, .vh = e.vh,
-            .w = @floatFromInt(e.pixel_w), .h = @floatFromInt(e.pixel_h),
-            .ox = @floatFromInt(e.off_x), .oy = @floatFromInt(e.off_y),
-        };
-    }
-    return .{};
-}
-
-/// Emit one axis-aligned masked quad (4 verts, 6 indices) for a terrain triangle.
-/// `ox,oy` is the cell origin (ground phase anchor); the quad itself sits at
-/// `(ox,oy)+mask_offset` and is `mask.w × mask.h`. ground_local is relative to the
-/// cell origin so it tiles continuously; mask_uv maps the mask sprite 1:1.
-fn emitQuad(
-    verts: []MapRenderer.Vertex, idx: []u16, base: u16,
-    ox: f32, oy: f32, mr: MaskRegion,
-    eu: f32, ev: f32, euw: f32, evh: f32,
-    cr: f32, cg: f32, cb: f32, ca: f32,
-) void {
-    const qx = ox + mr.ox;
-    const qy = oy + mr.oy;
-    const glx0 = (qx - ox) / TileWidth;
-    const gly0 = (qy - oy) / TileHeight;
-    const glx1 = (qx + mr.w - ox) / TileWidth;
-    const gly1 = (qy + mr.h - oy) / TileHeight;
-    verts[0] = .{ .x = qx, .y = qy, .gl_u = glx0, .gl_v = gly0,
-        .gr_u = eu, .gr_v = ev, .gr_uw = euw, .gr_vh = evh,
-        .m_u = mr.u, .m_v = mr.v, .r = cr, .g = cg, .b = cb, .a = ca };
-    verts[1] = .{ .x = qx + mr.w, .y = qy, .gl_u = glx1, .gl_v = gly0,
-        .gr_u = eu, .gr_v = ev, .gr_uw = euw, .gr_vh = evh,
-        .m_u = mr.u + mr.uw, .m_v = mr.v, .r = cr, .g = cg, .b = cb, .a = ca };
-    verts[2] = .{ .x = qx + mr.w, .y = qy + mr.h, .gl_u = glx1, .gl_v = gly1,
-        .gr_u = eu, .gr_v = ev, .gr_uw = euw, .gr_vh = evh,
-        .m_u = mr.u + mr.uw, .m_v = mr.v + mr.vh, .r = cr, .g = cg, .b = cb, .a = ca };
-    verts[3] = .{ .x = qx, .y = qy + mr.h, .gl_u = glx0, .gl_v = gly1,
-        .gr_u = eu, .gr_v = ev, .gr_uw = euw, .gr_vh = evh,
-        .m_u = mr.u, .m_v = mr.v + mr.vh, .r = cr, .g = cg, .b = cb, .a = ca };
-    idx[0] = base + 0; idx[1] = base + 1; idx[2] = base + 2;
-    idx[3] = base + 0; idx[4] = base + 2; idx[5] = base + 3;
-}
-
-/// Build a terrain vertex. ground_local is screen-space (x/32, y/20) so the flat
-/// ground texture tiles seamlessly across the whole map; (ba,bb) are barycentric.
-fn mkVert(x: f32, y: f32, eu: f32, ev: f32, euw: f32, evh: f32,
+/// Build a terrain vertex. `(gu,gv)` is the screen-space ground-local UV (x/32,
+/// y/20) so the flat ground texture tiles seamlessly across the map.
+/// (ba,bb) are barycentric (overlay edge-fade); (r,g,b) is the brightness tint.
+fn mkVert(x: f32, y: f32, gu: f32, gv: f32, eu: f32, ev: f32, euw: f32, evh: f32,
     ba: f32, bb: f32, r: f32, g: f32, b: f32, a: f32) MapRenderer.Vertex {
     return .{
         .x = x, .y = y,
-        .gl_u = x / TileWidth, .gl_v = y / TileHeight,
+        .gl_u = gu, .gl_v = gv,
         .gr_u = eu, .gr_v = ev, .gr_uw = euw, .gr_vh = evh,
         .m_u = ba, .m_v = bb, .r = r, .g = g, .b = b, .a = a,
     };
@@ -218,14 +145,21 @@ fn mkVert(x: f32, y: f32, eu: f32, ev: f32, euw: f32, evh: f32,
 /// Emit one overlay triangle (3 verts, 3 indices): the triangle A,B,C expanded
 /// from its centroid by `expand` (so it bleeds into neighbours) and tagged with
 /// barycentric coords A=(1,0) B=(0,1) C=(0,0) for the shader's edge-fade dither.
+/// Ground UV is screen-space so the overlay tiles like the base.
 fn emitTri(verts: []MapRenderer.Vertex, idx: []u16, base: u16,
     ax: f32, ay: f32, bx: f32, by: f32, cx: f32, cy: f32, expand: f32,
-    eu: f32, ev: f32, euw: f32, evh: f32, r: f32, g: f32, b: f32, a: f32) void {
+    eu: f32, ev: f32, euw: f32, evh: f32,
+    c0: [3]f32, c1: [3]f32, c2: [3]f32, a: f32) void {
     const gx = (ax + bx + cx) / 3.0;
     const gy = (ay + by + cy) / 3.0;
-    verts[0] = mkVert(gx + (ax - gx) * expand, gy + (ay - gy) * expand, eu, ev, euw, evh, 1, 0, r, g, b, a);
-    verts[1] = mkVert(gx + (bx - gx) * expand, gy + (by - gy) * expand, eu, ev, euw, evh, 0, 1, r, g, b, a);
-    verts[2] = mkVert(gx + (cx - gx) * expand, gy + (cy - gy) * expand, eu, ev, euw, evh, 0, 0, r, g, b, a);
+    const x0 = gx + (ax - gx) * expand; const y0 = gy + (ay - gy) * expand;
+    const x1 = gx + (bx - gx) * expand; const y1 = gy + (by - gy) * expand;
+    const x2 = gx + (cx - gx) * expand; const y2 = gy + (cy - gy) * expand;
+    // Per-vertex tint (c0,c1,c2) so the overlay shades smoothly like the base,
+    // instead of a flat single-brightness triangle.
+    verts[0] = mkVert(x0, y0, x0 / TileWidth, y0 / TileHeight, eu, ev, euw, evh, 1, 0, c0[0], c0[1], c0[2], a);
+    verts[1] = mkVert(x1, y1, x1 / TileWidth, y1 / TileHeight, eu, ev, euw, evh, 0, 1, c1[0], c1[1], c1[2], a);
+    verts[2] = mkVert(x2, y2, x2 / TileWidth, y2 / TileHeight, eu, ev, euw, evh, 0, 0, c2[0], c2[1], c2[2], a);
     idx[0] = base + 0;
     idx[1] = base + 1;
     idx[2] = base + 2;
@@ -330,7 +264,6 @@ pub const MapRenderer = struct {
         var ov_ic: usize = 0; // overlay index count
 
         const hw = TileWidth / 2.0; // 16
-        const FLAT_VARIANT: u16 = 4; // one uniform sprite per terrain (smooth interiors)
         const EXPAND: f32 = 1.7; // how far overlay triangles bleed into neighbours
         // (wider bleed + smoothstep density ramp in the shader = a gradual,
         //  smooth dithered dissolve at terrain boundaries, like the C# masks).
@@ -357,24 +290,32 @@ pub const MapRenderer = struct {
                 const Dx = lx - hw;        const Dy = ly + TileHeight - hDn; // Dn
                 const Qx = lx + hw;        const Qy = ly + TileHeight - hDR; // DR
 
-                // Terrain ground region (flat variant) + colour fallback (water).
+                // Flat ground sprite (one per terrain); relief comes from shading.
                 var eu: f32 = 0; var ev: f32 = 0; var euw: f32 = 0; var evh: f32 = 0;
                 var ca: f32 = 0;
                 if (atlas) |a| {
-                    if (terrainSpriteId(tile.terrain, FLAT_VARIANT)) |sid| {
+                    if (terrainSpriteId(tile.terrain)) |sid| {
                         if (a.get(sid)) |e| { eu = e.u; ev = e.v; euw = e.uw; evh = e.vh; ca = 1; }
                     }
                 }
                 const fb = terrainColor(tile.terrain);
-                const cr = fb[0]; const cg = fb[1]; const cb = fb[2];
 
-                // ── BASE parallelogram: verts P,R,Dn,DR; UP=(P,Dn,DR) DOWN=(P,R,DR)
+                // Per-corner brightness from the height slope; tint per corner:
+                // textured → (s,s,s); water (no sprite) → fallback*s.
+                const cP = cornerTint(fb, ca, shadeAt(map, x, y));
+                const cR = cornerTint(fb, ca, shadeAt(map, x + 1, y));
+                const cDn = cornerTint(fb, ca, shadeAt(map, x, y + 1));
+                const cDR = cornerTint(fb, ca, shadeAt(map, x + 1, y + 1));
+
+                // ── BASE parallelogram: verts P,R,Dn,DR; UP=(P,Dn,DR) DOWN=(P,R,DR).
+                // Ground UV is screen-space (x/32, y/20) so the flat sprite tiles
+                // seamlessly via the shader's fract().
                 const bvi = ti * 4;
                 const bii = ti * 6;
-                base_v[bvi + 0] = mkVert(Px, Py, eu, ev, euw, evh, 0, 0, cr, cg, cb, ca); // P
-                base_v[bvi + 1] = mkVert(Rx, Ry, eu, ev, euw, evh, 0, 0, cr, cg, cb, ca); // R
-                base_v[bvi + 2] = mkVert(Dx, Dy, eu, ev, euw, evh, 0, 0, cr, cg, cb, ca); // Dn
-                base_v[bvi + 3] = mkVert(Qx, Qy, eu, ev, euw, evh, 0, 0, cr, cg, cb, ca); // DR
+                base_v[bvi + 0] = mkVert(Px, Py, Px / TileWidth, Py / TileHeight, eu, ev, euw, evh, 0, 0, cP[0], cP[1], cP[2], ca); // P
+                base_v[bvi + 1] = mkVert(Rx, Ry, Rx / TileWidth, Ry / TileHeight, eu, ev, euw, evh, 0, 0, cR[0], cR[1], cR[2], ca); // R
+                base_v[bvi + 2] = mkVert(Dx, Dy, Dx / TileWidth, Dy / TileHeight, eu, ev, euw, evh, 0, 0, cDn[0], cDn[1], cDn[2], ca); // Dn
+                base_v[bvi + 3] = mkVert(Qx, Qy, Qx / TileWidth, Qy / TileHeight, eu, ev, euw, evh, 0, 0, cDR[0], cDR[1], cDR[2], ca); // DR
                 base_i[bii + 0] = @intCast(bvi + 0); // UP: P
                 base_i[bii + 1] = @intCast(bvi + 2); //     Dn
                 base_i[bii + 2] = @intCast(bvi + 3); //     DR
@@ -383,14 +324,22 @@ pub const MapRenderer = struct {
                 base_i[bii + 5] = @intCast(bvi + 3); //       DR
 
                 // ── OVERLAY: only boundary tiles get the dithered transition ──
+                // The overlay always uses the flat variant + screen-space UV; its tint
+                // is the apex-corner colour so it matches the base near that vertex.
                 if (isTerrainBoundary(map, x, y)) {
-                    // UP triangle P,Dn,DR and DOWN triangle P,R,DR, each expanded
-                    // from its centroid and tagged with barycentric (1,0)/(0,1)/(0,0).
+                    var ou: f32 = 0; var ov: f32 = 0; var ouw: f32 = 0; var ovh: f32 = 0;
+                    if (atlas) |a| {
+                        if (terrainSpriteId(tile.terrain)) |sid| {
+                            if (a.get(sid)) |e| { ou = e.u; ov = e.v; ouw = e.uw; ovh = e.vh; }
+                        }
+                    }
+                    // UP triangle P,Dn,DR → per-vertex tints cP,cDn,cDR.
                     emitTri(ov_v[ov_vc .. ov_vc + 3], ov_i[ov_ic .. ov_ic + 3], @intCast(ov_vc),
-                        Px, Py, Dx, Dy, Qx, Qy, EXPAND, eu, ev, euw, evh, cr, cg, cb, ca);
+                        Px, Py, Dx, Dy, Qx, Qy, EXPAND, ou, ov, ouw, ovh, cP, cDn, cDR, ca);
                     ov_vc += 3; ov_ic += 3;
+                    // DOWN triangle P,R,DR → per-vertex tints cP,cR,cDR.
                     emitTri(ov_v[ov_vc .. ov_vc + 3], ov_i[ov_ic .. ov_ic + 3], @intCast(ov_vc),
-                        Px, Py, Rx, Ry, Qx, Qy, EXPAND, eu, ev, euw, evh, cr, cg, cb, ca);
+                        Px, Py, Rx, Ry, Qx, Qy, EXPAND, ou, ov, ouw, ovh, cP, cR, cDR, ca);
                     ov_vc += 3; ov_ic += 3;
                 }
             }

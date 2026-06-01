@@ -161,18 +161,6 @@ pub const TextureAtlas = struct {
     pub fn has(self: *TextureAtlas, sprite_id: u16) bool { return self.entries.contains(sprite_id); }
     pub fn count(self: TextureAtlas) usize { return self.entries.count(); }
 
-    /// Load MASK sprites (AssetMapMaskUp PAK 60-140, AssetMapMaskDown 141-221)
-    /// using the RLE mask decoder. Packed under their PAK index as the key.
-    pub fn loadMaskRange(self: *TextureAtlas, pak: *const PakFile, decoder: *BmpDecoder, start: u16, end: u16) !void {
-        var i = start;
-        while (i < end and i < pak.fileCount()) : (i += 1) {
-            const raw = pak.getFile(i) catch continue;
-            var sprite = decoder.decodeMask(raw) catch continue;
-            defer sprite.deinit(self.allocator);
-            _ = try self.packSprite(i, &sprite);
-        }
-    }
-
     /// Load terrain tiles from PAK and pack into atlas.
     pub fn loadTerrainSprites(self: *TextureAtlas, pak: *PakFile, decoder: *BmpDecoder) !void {
         const ids = [_]u16{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };

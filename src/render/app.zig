@@ -230,12 +230,6 @@ pub const App = struct {
         // Offset 32 (PAK 292) is the water sprite used for all Water terrain types.
         try atlas.loadRange(&pak, &self.decoder, 260, 293);
 
-        // Triangle slope masks: AssetMapMaskUp (PAK 60-140) and AssetMapMaskDown
-        // (PAK 141-221), 81 each. Used as binary stencils by the masked-terrain
-        // shader to carve each ground quad into a sloped triangle.
-        try atlas.loadMaskRange(&pak, &self.decoder, 60, 141);
-        try atlas.loadMaskRange(&pak, &self.decoder, 141, 222);
-
         // Animated water waves: AssetMapWaves PAK 630-645 (16 frames, 48×19,
         // transparent sprites). Drawn as an overlay on water tiles.
         try atlas.loadRange(&pak, &self.decoder, 630, 646);

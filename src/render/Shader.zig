@@ -187,7 +187,9 @@ pub const Shader = struct {
             \\void main() {
             \\    vec2 g = fract(v_ground_local);
             \\    vec4 px = texture2D(u_texture, v_ground_region.xy + g * v_ground_region.zw);
-            \\    vec3 outc = mix(v_color.rgb, px.rgb, v_color.a);
+            \\    // v_color.rgb is a brightness/tint multiplier (height shading);
+            \\    // a=1 → shaded texture (px*tint), a=0 → flat fallback colour (water).
+            \\    vec3 outc = mix(v_color.rgb, px.rgb * v_color.rgb, v_color.a);
             \\    if (u_use_mask > 0.5) {
             \\        // Edge-fade density gradient: ~0 at the rim → 1 toward the core,
             \\        // ramped with smoothstep over a WIDE band so the dither dissolves
@@ -213,55 +215,6 @@ pub const Shader = struct {
         return s;
     }
 
-    /// Create the terrain shader.
-    /// Vertex layout: a_position(2), a_uv_region(4), a_color(4).
-    /// The fragment shader tiles the sprite using screen-space coordinates so
-    /// adjacent triangles sample the same phase of the texture — no UV seams.
-    pub fn createTerrain() !Shader {
-        const vs: [:0]const u8 =
-            \\#version 120
-            \\uniform mat4 u_projection;
-            \\uniform mat4 u_modelview;
-            \\attribute vec2 a_position;
-            \\attribute vec4 a_uv_region;
-            \\attribute vec4 a_color;
-            \\varying vec2 v_screen_pos;
-            \\varying vec4 v_uv_region;
-            \\varying vec4 v_color;
-            \\void main() {
-            \\    v_screen_pos = a_position;
-            \\    v_uv_region  = a_uv_region;
-            \\    v_color      = a_color;
-            \\    gl_Position  = u_projection * u_modelview * vec4(a_position, 0.0, 1.0);
-            \\}
-        ;
-        // Tile the terrain sprite in screen space (32×20 px per tile).
-        // fract(screen_pos / tile_size) gives a [0,1] phase that is the same
-        // at any screen position regardless of which triangle covers it, so
-        // adjacent tiles of the same terrain have perfectly continuous texture.
-        const fs: [:0]const u8 =
-            \\#version 120
-            \\uniform sampler2D u_texture;
-            \\varying vec2 v_screen_pos;
-            \\varying vec4 v_uv_region;
-            \\varying vec4 v_color;
-            \\const vec2 TILE_SIZE = vec2(32.0, 20.0);
-            \\void main() {
-            \\    vec2 frac_uv  = fract(v_screen_pos / TILE_SIZE);
-            \\    vec2 atlas_uv = v_uv_region.xy + frac_uv * v_uv_region.zw;
-            \\    vec4 tex      = texture2D(u_texture, atlas_uv);
-            \\    gl_FragColor  = tex * v_color;
-            \\}
-        ;
-        const s = try Shader.init(vs, fs);
-        // Re-bind attributes for this layout (init() binds default names).
-        gl.bindAttribLocation(s.program, 0, "a_position");
-        gl.bindAttribLocation(s.program, 1, "a_uv_region");
-        gl.bindAttribLocation(s.program, 2, "a_color");
-        // Re-link so the new bindings take effect.
-        gl.linkProgram(s.program);
-        return s;
-    }
 };
 
 // === Default GLSL shaders ===
