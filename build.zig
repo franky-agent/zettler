@@ -123,4 +123,42 @@ pub fn build(b: *std.Build) void {
     const scan_run = b.addRunArtifact(scan_exe);
     const scan_step = b.step("scan-sprites", "Scan SPAE.PA sprite dimensions");
     scan_step.dependOn(&scan_run.step);
+
+    // Check sprite IDs against C++ freeserf map_building_sprite
+    const check_ids_exe = b.addExecutable(.{
+        .name = "check-ids",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/check_mapobject.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "data", .module = data_mod },
+                .{ .name = "core", .module = core_mod },
+                .{ .name = "serialize", .module = serialize_mod },
+            },
+        }),
+    });
+    check_ids_exe.root_module.link_libc = true;
+    const check_ids_run = b.addRunArtifact(check_ids_exe);
+    const check_ids_step = b.step("check-ids", "Check building sprite IDs against C++ freeserf");
+    check_ids_step.dependOn(&check_ids_run.step);
+
+    // Check terrain alpha
+    const check_alpha_exe = b.addExecutable(.{
+        .name = "check-alpha",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/check_terrain_alpha.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "data", .module = data_mod },
+                .{ .name = "core", .module = core_mod },
+                .{ .name = "serialize", .module = serialize_mod },
+            },
+        }),
+    });
+    check_alpha_exe.root_module.link_libc = true;
+    const check_alpha_run = b.addRunArtifact(check_alpha_exe);
+    const check_alpha_step = b.step("check-alpha", "Check terrain sprite alpha/transparency");
+    check_alpha_step.dependOn(&check_alpha_run.step);
 }

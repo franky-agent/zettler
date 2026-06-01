@@ -226,11 +226,38 @@ pub const App = struct {
         var atlas = try TextureAtlas.init(self.allocator);
         errdefer atlas.deinit();
 
-        // Terrain sprites: indices 259-308 (32×20 solid tiles)
-        try atlas.loadRange(&pak, &self.decoder, 259, 309);
+        // Terrain sprites: PAK 260-292 (C++ AssetMapGround, base 260, offsets 0-32).
+        // Offset 32 (PAK 292) is the water sprite used for all Water terrain types.
+        try atlas.loadRange(&pak, &self.decoder, 260, 293);
 
-        // Building sprites: indices 200-240 (building diamond sprites)
-        try atlas.loadRange(&pak, &self.decoder, 200, 241);
+        // Building sprites: specific PAK indices from AssetMapObject
+        // (base 1250 + hex offsets from C++ map_building_sprite[])
+        const building_ids = [_]u16{
+            sprite_ids.MAP_OBJECT_BASE + 0x98,  // fortress
+            sprite_ids.MAP_OBJECT_BASE + 0x99,  // toolmaker
+            sprite_ids.MAP_OBJECT_BASE + 0x9a,  // farm
+            sprite_ids.MAP_OBJECT_BASE + 0x9b,  // pig_farm
+            sprite_ids.MAP_OBJECT_BASE + 0x9c,  // slaughterhouse
+            sprite_ids.MAP_OBJECT_BASE + 0x9d,  // armory
+            sprite_ids.MAP_OBJECT_BASE + 0x9e,  // tower
+            sprite_ids.MAP_OBJECT_BASE + 0x9f,  // gold_smelter
+            sprite_ids.MAP_OBJECT_BASE + 0xa0,  // sawmill
+            sprite_ids.MAP_OBJECT_BASE + 0xa1,  // iron_smelter
+            sprite_ids.MAP_OBJECT_BASE + 0xa2,  // bakery
+            sprite_ids.MAP_OBJECT_BASE + 0xa3,  // granite_mine
+            sprite_ids.MAP_OBJECT_BASE + 0xa4,  // coal_mine
+            sprite_ids.MAP_OBJECT_BASE + 0xa5,  // iron_mine
+            sprite_ids.MAP_OBJECT_BASE + 0xa6,  // gold_mine
+            sprite_ids.MAP_OBJECT_BASE + 0xa7,  // fisher
+            sprite_ids.MAP_OBJECT_BASE + 0xa8,  // lumberjack
+            sprite_ids.MAP_OBJECT_BASE + 0xa9,  // stonecutter
+            sprite_ids.MAP_OBJECT_BASE + 0xaa,  // forester
+            sprite_ids.MAP_OBJECT_BASE + 0xae,  // boatbuilder
+            sprite_ids.MAP_OBJECT_BASE + 0xb2,  // castle
+            sprite_ids.MAP_OBJECT_BASE + 0xbc,  // mill
+            sprite_ids.MAP_OBJECT_BASE + 0xc0,  // stock
+        };
+        try atlas.loadBuildingSprites(&pak, &self.decoder, &building_ids);
 
         atlas.upload() catch |e| {
             std.debug.print("  Atlas upload error: {}\n", .{e});
@@ -348,50 +375,70 @@ pub const App = struct {
         const cam = &self.camera;
         const tw: f32 = map_renderer_mod.TileWidth;
         const th: f32 = map_renderer_mod.TileHeight;
-        // Building diamond: 1.5 tiles wide, 3 tiles tall.
-        const hw: f32 = tw * 0.75; // half-width
-        const hh: f32 = th * 1.5; // half-height
+        const hw: f32 = tw / 2.0;
 
         batcher.begin();
         for (self.game.state.buildings.buildings.items) |*b| {
             if (!b.is_done) continue;
-            const wx = @as(f32, @floatFromInt(b.pos.x)) * tw + @as(f32, @floatFromInt(b.pos.y & 1)) * (tw / 2.0);
-            const wy = @as(f32, @floatFromInt(b.pos.y)) * (th / 2.0);
+
+            // Use original Settlers isometric projection (same as terrain).
+            const wx = @as(f32, @floatFromInt(b.pos.x)) * tw -
+                @as(f32, @floatFromInt(b.pos.y)) * hw;
+            const wy = @as(f32, @floatFromInt(b.pos.y)) * th;
 
             if (self.atlas_loaded and self.atlas.uploaded) {
                 if (sprite_ids.Building.fromGameBuilding(b.building_type)) |sprite_id| {
                     if (self.atlas.get(sprite_id)) |entry| {
-                        // Textured diamond: map each vertex to the sprite's UV rect.
-                        // Top vertex → top-center UV, Right → right-center, etc.
-                        batcher.addTexturedQuad(
-                            wx,
-                            wy - hh,
-                            entry.u + entry.uw / 2.0,
-                            entry.v, // top
-                            wx + hw,
-                            wy,
-                            entry.u + entry.uw,
-                            entry.v + entry.vh / 2.0, // right
-                            wx,
-                            wy + hh,
-                            entry.u + entry.uw / 2.0,
-                            entry.v + entry.vh, // bottom
-                            wx - hw,
-                            wy,
-                            entry.u,
-                            entry.v + entry.vh / 2.0, // left
-                        );
+                        // Draw building sprite as axis-aligned rectangle.
+                        // The sprite itself contains the diamond shape with
+                        // transparent corners — same as terrain tiles.
+                        batcher.add(.{
+                            .x = wx - @as(f32, @floatFromInt(entry.pixel_w)) / 2.0,
+                            .y = wy - @as(f32, @floatFromInt(entry.pixel_h)),
+                            .width = @floatFromInt(entry.pixel_w),
+                            .height = @floatFromInt(entry.pixel_h),
+                            .u = entry.u,
+                            .v = entry.v,
+                            .uw = entry.uw,
+                            .vh = entry.vh,
+                            .r = 1.0,
+                            .g = 1.0,
+                            .b = 1.0,
+                            .a = 1.0,
+                        });
                     } else {
                         const c = buildingColor(b.building_type);
-                        batcher.addRawQuad(wx, wy - hh, wx + hw, wy, wx, wy + hh, wx - hw, wy, c[0], c[1], c[2], 0.9);
+                        // Fallback: simple rectangle
+                        batcher.add(.{
+                            .x = wx - hw,
+                            .y = wy - th,
+                            .width = tw,
+                            .height = th * 2,
+                            .u = 0, .v = 0, .uw = 0, .vh = 0,
+                            .r = c[0], .g = c[1], .b = c[2], .a = 0.9,
+                        });
                     }
                 } else {
                     const c = buildingColor(b.building_type);
-                    batcher.addRawQuad(wx, wy - hh, wx + hw, wy, wx, wy + hh, wx - hw, wy, c[0], c[1], c[2], 0.9);
+                    batcher.add(.{
+                        .x = wx - hw,
+                        .y = wy - th,
+                        .width = tw,
+                        .height = th * 2,
+                        .u = 0, .v = 0, .uw = 0, .vh = 0,
+                        .r = c[0], .g = c[1], .b = c[2], .a = 0.9,
+                    });
                 }
             } else {
                 const c = buildingColor(b.building_type);
-                batcher.addRawQuad(wx, wy - hh, wx + hw, wy, wx, wy + hh, wx - hw, wy, c[0], c[1], c[2], 0.9);
+                batcher.add(.{
+                    .x = wx - hw,
+                    .y = wy - th,
+                    .width = tw,
+                    .height = th * 2,
+                    .u = 0, .v = 0, .uw = 0, .vh = 0,
+                    .r = c[0], .g = c[1], .b = c[2], .a = 0.9,
+                });
             }
         }
 

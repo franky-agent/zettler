@@ -179,7 +179,10 @@ pub const Map = struct {
     }
 
     /// Generate a simple terrain using diamond-square (value noise).
-    /// Water below water_threshold, mountain above mountain_threshold.
+    /// Terrain types use only values present in the original C++ terrain enum
+    /// (Water, Grass, Tundra, Snow, Desert) — these have actual sprites in the
+    /// AssetMapGround bank (PAK 260-292). Mountain/swamp/lava are not used here
+    /// because no PAK sprites exist for them.
     pub fn generateTerrain(self: *Map, seed: u64) void {
         var prng = std.Random.DefaultPrng.init(seed);
         const r = prng.random();
@@ -187,7 +190,8 @@ pub const Map = struct {
         const w = self.width;
         const h = self.height;
 
-        // Fill with random heights
+        // Fill with random heights and map to terrain types with sprites.
+        // Height progression: water (0-3) → grass (4-9) → tundra (10-12) → snow (13-15)
         for (0..h) |y| {
             for (0..w) |x| {
                 const pos = MapPos{ .x = @intCast(x), .y = @intCast(y) };
@@ -195,26 +199,27 @@ pub const Map = struct {
                 self.getTile(pos).height = height;
                 const terrain: Terrain = if (height <= TerrainGen.water_threshold)
                     .water
-                else if (height >= TerrainGen.mountain_threshold)
-                    .mountain
+                else if (height >= 13)
+                    .snow
+                else if (height >= 10)
+                    .tundra
                 else
                     .grass;
                 self.getTile(pos).terrain = terrain;
             }
         }
 
-        // Simple smoothing: average with neighbors
+        // Smooth out isolated water tiles surrounded by walkable land.
         for (0..h) |y| {
             for (0..w) |x| {
                 const pos = MapPos{ .x = @intCast(x), .y = @intCast(y) };
-                if (self.getTile(pos).terrain == .water or self.getTile(pos).terrain == .mountain) {
+                if (self.getTile(pos).terrain == .water) {
                     const neighbors = self.getAllNeighbors(pos);
                     var walkable_count: u8 = 0;
                     for (neighbors) |n| {
                         if (n.eql(MapPos.invalid)) continue;
                         if (self.getTile(n).terrain.isWalkable()) walkable_count += 1;
                     }
-                    // Convert isolated water/mountain tiles
                     if (walkable_count >= 4) {
                         self.getTile(pos).terrain = .grass;
                     }
@@ -253,25 +258,30 @@ test "Map terrain generation" {
     defer map.deinit();
 
     map.generateTerrain(42);
-    
-    // After generation, we should have a mix of terrains
+
+    // After generation we should have water, grassy lowland, and snowy highland.
+    // generateTerrain only emits terrain types that have PAK sprites (water, grass,
+    // tundra, snow) — mountain/swamp/lava are never generated.
     var water_count: usize = 0;
-    var mountain_count: usize = 0;
-    var grass_count: usize = 0;
+    var snow_count: usize = 0;
+    var other_count: usize = 0;
 
     for (0..map.height) |y| {
         for (0..map.width) |x| {
             const tile = map.getTileXY(@intCast(x), @intCast(y));
             switch (tile.terrain) {
                 .water => water_count += 1,
-                .mountain => mountain_count += 1,
-                else => grass_count += 1,
+                .snow  => snow_count += 1,
+                else   => other_count += 1,
             }
+            // mountain/swamp/lava must never be generated
+            try std.testing.expect(tile.terrain != .mountain);
+            try std.testing.expect(tile.terrain != .swamp);
+            try std.testing.expect(tile.terrain != .lava);
         }
     }
 
-    // Should have at least some of each
     try std.testing.expect(water_count > 0);
-    try std.testing.expect(mountain_count > 0);
-    try std.testing.expect(grass_count > 0);
+    try std.testing.expect(snow_count > 0);
+    try std.testing.expect(other_count > 0);
 }

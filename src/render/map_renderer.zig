@@ -1,8 +1,15 @@
 //! Map renderer — renders the hex grid terrain with textured quads.
 //!
-//! Each terrain tile is an axis-aligned 32×20 rectangle. The terrain sprite
-//! contains the diamond shape within it; transparent corners are discarded by
-//! alpha blending. Tiles overlap in painter's order (top row first).
+//! Each terrain tile is drawn as a diamond (like the original Settlers).
+//! Uses the original Settlers isometric coordinate projection:
+//!   screen_x = col * TileWidth  - row * (TileWidth/2)
+//!   screen_y = row * TileHeight
+//!
+//! In the original C++ code, terrain sprites (AssetMapGround) are fully
+//! opaque solid rectangles (SpriteTypeSolid). The diamond shape comes from
+//! a separate mask system (AssetMapMaskUp/AssetMapMaskDown) plus rendering
+//! each tile as two triangles. Here we achieve the same diamond shape by
+//! rendering each tile as a 4-vertex diamond (up+down triangles).
 
 const std = @import("std");
 const gl = @import("gl.zig");
@@ -19,28 +26,54 @@ const Terrain = core.map.Terrain;
 pub const TileWidth: f32 = 32.0;
 pub const TileHeight: f32 = 20.0;
 
-/// First PAK index of the 32×20 terrain sprites.
-pub const TERRAIN_SPRITE_BASE: u16 = 259;
+/// First PAK index of the 32×20 terrain sprites (C++ AssetMapGround base).
+pub const TERRAIN_SPRITE_BASE: u16 = 260;
 
-/// Map terrain type to a PAK sprite index.
-fn terrainSpriteId(t: Terrain) u16 {
-    // Settlers 1 terrain sprites at 259-308.
-    // Empirical mapping: 0=water, 1=grass, 2=tundra, 3=snow, 4=swamp,
-    // 5=lava, 6=desert, 7-10=mountain variants.
-    const offset: u16 = switch (t) {
-        .water => 0,
-        .grass => 4,
+/// Height-mask lookup table for the up-pointing triangle (from C++ viewport.cc tri_mask[]).
+/// Index = 4 + (m - left) + 9 * (4 + (m - right)), clamped to [0,8] each axis.
+/// Returns sprite variant 0-7, or -1 for invalid combinations.
+const TRI_MASK_UP = [81]i8{
+     0,  1,  3,  6,  7, -1, -1, -1, -1,
+     0,  1,  2,  5,  6,  7, -1, -1, -1,
+     0,  1,  2,  3,  5,  6,  7, -1, -1,
+     0,  1,  2,  3,  4,  5,  6,  7, -1,
+     0,  1,  2,  3,  4,  4,  5,  6,  7,
+    -1,  0,  1,  2,  3,  4,  5,  6,  7,
+    -1, -1,  0,  1,  2,  4,  5,  6,  7,
+    -1, -1, -1,  0,  1,  2,  5,  6,  7,
+    -1, -1, -1, -1,  0,  1,  4,  6,  7,
+};
+
+/// Compute the height-variant sprite index (0-7) for a tile given its center
+/// height `m` and the heights of its lower (`left`) and lower-right (`right`)
+/// neighbors. Matches the C++ up-triangle mask formula. Returns 4 (flat) on
+/// invalid/edge combinations.
+fn heightVariant(m: i32, left: i32, right: i32) u16 {
+    const dl = @max(-4, @min(4, m - left));
+    const dr = @max(-4, @min(4, m - right));
+    const idx: usize = @intCast(4 + dl + 9 * (4 + dr));
+    if (idx < 81 and TRI_MASK_UP[idx] >= 0) return @intCast(TRI_MASK_UP[idx]);
+    return 4; // fallback: flat-terrain sprite
+}
+
+/// Map terrain type + height variant (0-7) to a PAK sprite index.
+/// tri_spr[] groups (C++ AssetMapGround, base PAK 260):
+///   Water  → offset 32 (PAK 292) — single sprite, variant ignored
+///   Grass  → offsets  0-7  (PAK 260-267)
+///   Tundra → offsets  8-15 (PAK 268-275)
+///   Snow   → offsets 16-23 (PAK 276-283)
+///   Desert → offsets 24-31 (PAK 284-291)
+fn terrainSpriteId(t: Terrain, variant: u16) ?u16 {
+    const base: u16 = switch (t) {
+        .water  => return TERRAIN_SPRITE_BASE + 32,
+        .grass  => 0,
         .tundra => 8,
-        .snow => 12,
-        .swamp => 16,
-        .lava => 20,
+        .snow   => 16,
         .desert => 24,
-        .mountain => 28,
-        .mountain2 => 32,
-        .mountain_mined => 36,
-        .mountain_flagged => 40,
+        // Not in original C++ terrain enum — no sprites available.
+        .swamp, .lava, .mountain, .mountain2, .mountain_mined, .mountain_flagged => return null,
     };
-    return TERRAIN_SPRITE_BASE + offset;
+    return TERRAIN_SPRITE_BASE + base + @min(variant, 7);
 }
 
 /// Fallback solid color when no atlas sprite is available.
@@ -115,51 +148,78 @@ pub const MapRenderer = struct {
 
         const num_tiles = map.tileCount();
         const allocator = std.heap.page_allocator;
+        // Each tile = 4 vertices (diamond)
         const vertices = try allocator.alloc(Vertex, num_tiles * 4);
         defer allocator.free(vertices);
         const indices = try allocator.alloc(u16, num_tiles * 6);
         defer allocator.free(indices);
 
-        const hw = TileWidth / 2.0;
-        const hh = TileHeight / 2.0;
+        const hw = TileWidth / 2.0;   // 16 = half diamond width
+        const hh = TileHeight;         // 20 = half diamond height (diamond is 32×40)
+        // A full Settlers tile forms a diamond from two stacked triangles.
+        // The diamond center Y is at: row * TileHeight + TileHeight
+        // (top vertex at row*TileHeight, bottom at row*TileHeight+40)
 
         for (0..map.height) |y| {
             for (0..map.width) |x| {
                 const ti = y * map.width + x;
                 const tile = map.getTileXY(@intCast(x), @intCast(y));
-                // Tile center in world space
-                const cx = @as(f32, @floatFromInt(x)) * TileWidth +
-                    @as(f32, @floatFromInt(y & 1)) * hw;
-                const cy = @as(f32, @floatFromInt(y)) * hh;
+
+                // Diamond center in isometric projection (matching C++ map_pix_from_map_coord).
+                // mx = 32*col - 16*row, my = 20*row
+                // Diamond center is at (mx + hw, my + hh).
+                const cx = @as(f32, @floatFromInt(x)) * TileWidth -
+                    @as(f32, @floatFromInt(y)) * hw + hw;
+                const cy = @as(f32, @floatFromInt(y)) * TileHeight + hh;
 
                 const vi = ti * 4;
                 const ii = ti * 6;
 
-                // UV coordinates — atlas slice if available, else full texture
-                var uvx0: f32 = 0;
-                var uvy0: f32 = 0;
-                var uvx1: f32 = 1;
-                var uvy1: f32 = 1;
+                // Compute height-based sprite variant (0-7) using the C++ up-triangle
+                // mask formula: variant depends on height differences to lower and
+                // lower-right neighbors.
+                const m: i32 = @intCast(tile.height);
+                const left: i32 = if (y + 1 < map.height)
+                    @intCast(map.getTileXY(@intCast(x), @intCast(y + 1)).height)
+                else
+                    m;
+                const right: i32 = if (x + 1 < map.width and y + 1 < map.height)
+                    @intCast(map.getTileXY(@intCast(x + 1), @intCast(y + 1)).height)
+                else
+                    m;
+                const variant = heightVariant(m, left, right);
+
+                // UV coordinates
+                var u: f32 = 0;
+                var v: f32 = 0;
+                var uw: f32 = 1;
+                var vh: f32 = 1;
+                var has_texture = false;
                 if (atlas) |a| {
-                    const sid = terrainSpriteId(tile.terrain);
-                    if (a.get(sid)) |entry| {
-                        uvx0 = entry.u;
-                        uvy0 = entry.v;
-                        uvx1 = entry.u + entry.uw;
-                        uvy1 = entry.v + entry.vh;
+                    if (terrainSpriteId(tile.terrain, variant)) |sid| {
+                        if (a.get(sid)) |entry| {
+                            u = entry.u;
+                            v = entry.v;
+                            uw = entry.uw;
+                            vh = entry.vh;
+                            has_texture = true;
+                        }
                     }
                 }
 
-                // Color: white when texturing, terrain color for fallback
-                const c: [4]f32 = if (atlas != null) .{ 1, 1, 1, 1 } else terrainColor(tile.terrain);
+                const umid = u + uw / 2.0;
+                const vmid = v + vh / 2.0;
 
-                // Axis-aligned rectangle (sprite bounding box).
-                // Top-left, top-right, bottom-right, bottom-left
-                vertices[vi + 0] = .{ .x = cx - hw, .y = cy - hh, .u = uvx0, .v = uvy0, .r = c[0], .g = c[1], .b = c[2], .a = c[3] };
-                vertices[vi + 1] = .{ .x = cx + hw, .y = cy - hh, .u = uvx1, .v = uvy0, .r = c[0], .g = c[1], .b = c[2], .a = c[3] };
-                vertices[vi + 2] = .{ .x = cx + hw, .y = cy + hh, .u = uvx1, .v = uvy1, .r = c[0], .g = c[1], .b = c[2], .a = c[3] };
-                vertices[vi + 3] = .{ .x = cx - hw, .y = cy + hh, .u = uvx0, .v = uvy1, .r = c[0], .g = c[1], .b = c[2], .a = c[3] };
-                // Indices: two triangles (TL, TR, BR) and (TL, BR, BL)
+                // Color: white when texturing, terrain color for fallback
+                const c: [4]f32 = if (has_texture) .{ 1, 1, 1, 1 } else terrainColor(tile.terrain);
+
+                // Diamond quad: 4 vertices forming a diamond shape.
+                // Order: top, right, bottom, left (matching sprite_batcher.addTexturedQuad).
+                vertices[vi + 0] = .{ .x = cx, .y = cy - hh, .u = umid, .v = v,     .r = c[0], .g = c[1], .b = c[2], .a = c[3] };
+                vertices[vi + 1] = .{ .x = cx + hw, .y = cy, .u = u + uw, .v = vmid, .r = c[0], .g = c[1], .b = c[2], .a = c[3] };
+                vertices[vi + 2] = .{ .x = cx, .y = cy + hh, .u = umid, .v = v + vh, .r = c[0], .g = c[1], .b = c[2], .a = c[3] };
+                vertices[vi + 3] = .{ .x = cx - hw, .y = cy, .u = u,     .v = vmid, .r = c[0], .g = c[1], .b = c[2], .a = c[3] };
+                // Indices: two triangles (TL->TR->BR) + (TL->BR->BL)
                 indices[ii + 0] = @intCast(vi + 0);
                 indices[ii + 1] = @intCast(vi + 1);
                 indices[ii + 2] = @intCast(vi + 2);
@@ -197,7 +257,7 @@ pub const MapRenderer = struct {
         gl.enableVertexAttribArray(1);
         gl.vertexAttribPointer(1, 2, gl.GL_FLOAT, gl.GL_FALSE, stride, 8);
         gl.enableVertexAttribArray(2);
-        gl.vertexAttribPointer(2, 3, gl.GL_FLOAT, gl.GL_FALSE, stride, 16);
+        gl.vertexAttribPointer(2, 4, gl.GL_FLOAT, gl.GL_FALSE, stride, 16);
         gl.drawElements(gl.GL_TRIANGLES, @intCast(self.index_count), gl.GL_UNSIGNED_SHORT, 0);
         gl.disableVertexAttribArray(0);
         gl.disableVertexAttribArray(1);

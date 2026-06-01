@@ -562,7 +562,7 @@ test "Serf walking on land" {
     var serf = SerfStateData{
         .state = .walking_on_land,
         .pos = MapPos{ .x = 10, .y = 10 },
-        .path = [_]u8{ @intFromEnum(Direction.right), @intFromEnum(Direction.right_up), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+        .path = [_]u8{ @intFromEnum(Direction.right), @intFromEnum(Direction.down_right), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
         .path_length = 2,
         .path_index = 0,
     };

@@ -1,10 +1,21 @@
 //! Sprite IDs — known sprite indices in the SPAE.PA archive.
 //!
-//! These IDs are based on the original Settlers (1993) data format
-//! and the C# Freeserf sprite definitions. The actual IDs may vary
-//! slightly between language versions (SPAE=English, SPAD=German, etc.).
+//! These IDs are based on the original C++ freeserf source code.
+//! Building sprites live in the AssetMapObject asset which starts at PAK
+//! index 1250. The map_building_sprite[] table in interface.h maps building
+//! TYPE to a hex offset within AssetMapObject:
+//!
+//!   Actual PAK index = 1250 + hex_offset
+//!
+//! Verified against /tmp/freeserf/src/interface.h:33-38 and
+//! /tmp/freeserf/src/data-source-dos.cc:76.
+
+/// AssetMapObject base index in SPAE.PA.
+pub const MAP_OBJECT_BASE: u16 = 1250;
 
 /// Terrain map tiles (0-199).
+/// These are sprite IDs in the game_object asset (base 321) and map_ground
+/// asset (base 260), not direct PAK indices.
 pub const Terrain = struct {
     pub const first: u16 = 0;
     pub const grass_0: u16 = 0;
@@ -21,62 +32,86 @@ pub const Terrain = struct {
     pub const last: u16 = 199;
 };
 
-/// Building sprites (200-299).
+/// Building sprite IDs — offsets within AssetMapObject (base PAK index 1250).
+///
+/// These hex offsets come from /tmp/freeserf/src/interface.h:33-38.
+/// The C++ map_building_sprite[] array maps building TYPE (by C++ enum
+/// position) to a hex offset within AssetMapObject.
+///
+/// Actual PAK index = MAP_OBJECT_BASE + hex_offset.
+///
+/// Note: the C++ and Zig building enums have completely different ordering.
+/// The mapping below matches by building NAME, not by enum position.
 pub const Building = struct {
-    pub const first: u16 = 200;
-    pub const lumberjack: u16 = 200;
-    pub const stonecutter: u16 = 201;
-    pub const fisher: u16 = 202;
-    pub const forester: u16 = 203;
-    pub const sawmill: u16 = 204;
-    pub const boatbuilder: u16 = 205;
-    pub const farm: u16 = 206;
-    pub const mill: u16 = 207;
-    pub const bakery: u16 = 208;
-    pub const slaughterhouse: u16 = 209;
-    pub const pig_farm: u16 = 210;
-    pub const brewery: u16 = 211;
-    pub const winery: u16 = 212;
-    pub const coal_mine: u16 = 213;
-    pub const iron_mine: u16 = 214;
-    pub const gold_mine: u16 = 215;
-    pub const granite_mine: u16 = 216;
-    pub const iron_smelter: u16 = 217;
-    pub const gold_smelter: u16 = 218;
-    pub const armory: u16 = 219;
-    pub const toolmaker: u16 = 220;
-    pub const stock: u16 = 221;
-    pub const tower: u16 = 222;
-    pub const fortress: u16 = 223;
-    pub const last: u16 = 240;
+    pub const first: u16 = MAP_OBJECT_BASE + 0x98;  // fortress (smallest offset)
+    pub const last: u16 = MAP_OBJECT_BASE + 0xc0;   // stock (largest offset)
+
+    // Hex offsets from C++ map_building_sprite[], by C++ enum type:
+    //   None=0 (0), Fisher=1 (0xa7), Lumberjack=2 (0xa8),
+    //   Boatbuilder=3 (0xae), Stonecutter=4 (0xa9),
+    //   StoneMine=5 (0xa3), CoalMine=6 (0xa4), IronMine=7 (0xa5),
+    //   GoldMine=8 (0xa6), Forester=9 (0xaa), Stock=10 (0xc0),
+    //   Hut=11 (0xab), Farm=12 (0x9a), Butcher=13 (0x9c),
+    //   PigFarm=14 (0x9b), Mill=15 (0xbc), Baker=16 (0xa2),
+    //   Sawmill=17 (0xa0), SteelSmelter=18 (0xa1),
+    //   ToolMaker=19 (0x99), WeaponSmith=20 (0x9d),
+    //   Tower=21 (0x9e), Fortress=22 (0x98),
+    //   GoldSmelter=23 (0x9f), Castle=24 (0xb2)
+
+    pub const fisher: u16 = MAP_OBJECT_BASE + 0xa7;  // PAK 1417
+    pub const lumberjack: u16 = MAP_OBJECT_BASE + 0xa8;  // PAK 1418
+    pub const boatbuilder: u16 = MAP_OBJECT_BASE + 0xae;  // PAK 1424
+    pub const stonecutter: u16 = MAP_OBJECT_BASE + 0xa9;  // PAK 1419
+    pub const granite_mine: u16 = MAP_OBJECT_BASE + 0xa3;  // PAK 1413 (StoneMine)
+    pub const coal_mine: u16 = MAP_OBJECT_BASE + 0xa4;  // PAK 1414
+    pub const iron_mine: u16 = MAP_OBJECT_BASE + 0xa5;  // PAK 1415
+    pub const gold_mine: u16 = MAP_OBJECT_BASE + 0xa6;  // PAK 1416
+    pub const forester: u16 = MAP_OBJECT_BASE + 0xaa;  // PAK 1420
+    pub const stock: u16 = MAP_OBJECT_BASE + 0xc0;  // PAK 1442
+    pub const farm: u16 = MAP_OBJECT_BASE + 0x9a;  // PAK 1404
+    pub const slaughterhouse: u16 = MAP_OBJECT_BASE + 0x9c;  // PAK 1406 (Butcher)
+    pub const pig_farm: u16 = MAP_OBJECT_BASE + 0x9b;  // PAK 1405
+    pub const mill: u16 = MAP_OBJECT_BASE + 0xbc;  // PAK 1438
+    pub const bakery: u16 = MAP_OBJECT_BASE + 0xa2;  // PAK 1412 (Baker)
+    pub const sawmill: u16 = MAP_OBJECT_BASE + 0xa0;  // PAK 1410
+    pub const iron_smelter: u16 = MAP_OBJECT_BASE + 0xa1;  // PAK 1411 (SteelSmelter)
+    pub const toolmaker: u16 = MAP_OBJECT_BASE + 0x99;  // PAK 1403 (ToolMaker)
+    pub const armory: u16 = MAP_OBJECT_BASE + 0x9d;  // PAK 1407 (WeaponSmith)
+    pub const tower: u16 = MAP_OBJECT_BASE + 0x9e;  // PAK 1408
+    pub const fortress: u16 = MAP_OBJECT_BASE + 0x98;  // PAK 1402
+    pub const gold_smelter: u16 = MAP_OBJECT_BASE + 0x9f;  // PAK 1409 (GoldSmelter)
+
+    // Brewery and winery are not in the C++ freeserf building enum.
+    // They may have different sprite IDs in the C#-derived enum.
+    // For now, they return null (colored fallback).
 
     /// Get the sprite ID for a game Building enum.
     pub fn fromGameBuilding(b: core.Building) ?u16 {
         return switch (b) {
-            .lumberjack => 200,
-            .stonecutter => 201,
-            .fisher => 202,
-            .forester => 203,
-            .sawmill => 204,
-            .boatbuilder => 205,
-            .farm => 206,
-            .mill => 207,
-            .bakery => 208,
-            .slaughterhouse => 209,
-            .pig_farm => 210,
-            .brewery => 211,
-            .winery => 212,
-            .coal_mine => 213,
-            .iron_mine => 214,
-            .gold_mine => 215,
-            .granite_mine => 216,
-            .iron_smelter => 217,
-            .gold_smelter => 218,
-            .armory => 219,
-            .toolmaker => 220,
-            .stock => 221,
-            .tower => 222,
-            .fortress => 223,
+            .lumberjack => lumberjack,
+            .stonecutter => stonecutter,
+            .fisher => fisher,
+            .forester => forester,
+            .sawmill => sawmill,
+            .boatbuilder => boatbuilder,
+            .farm => farm,
+            .mill => mill,
+            .bakery => bakery,
+            .slaughterhouse => slaughterhouse,
+            .pig_farm => pig_farm,
+            .brewery => null,       // no C++ equivalent
+            .winery => null,         // no C++ equivalent
+            .coal_mine => coal_mine,
+            .iron_mine => iron_mine,
+            .gold_mine => gold_mine,
+            .granite_mine => granite_mine,
+            .iron_smelter => iron_smelter,
+            .gold_smelter => gold_smelter,
+            .armory => armory,
+            .toolmaker => toolmaker,
+            .stock => stock,
+            .tower => tower,
+            .fortress => fortress,
             else => null,
         };
     }

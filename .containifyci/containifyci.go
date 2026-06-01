@@ -19,9 +19,34 @@ func main() {
 	opts.Verbose = false
 	opts.Folder = "./"
 	opts.Image = ""
+	opts.ContainerFiles = map[string]*protos2.ContainerFile{
+		"build": DockerFile(),
+	}
 	opts.Properties = map[string]*build.ListValue{
 		"goreleaser": build.NewList("true"),
 		"optimize":   build.NewList("ReleaseFast"),
 	}
 	build.Build(opts)
+}
+
+func DockerFile() *protos2.ContainerFile {
+	return &protos2.ContainerFile{
+		Name: "zig-0.17.0-dev-263-0add2dfc4-alpine",
+		Content: `FROM --platform=$TARGETPLATFORM alpine:3.23
+ARG TARGETPLATFORM
+ARG BUILDPLATFORM
+ARG ZIG_VERSION=0.17.0-dev.263+0add2dfc4
+ARG ZIG_ARCH=x86_64  # Define the architecture
+
+RUN apk add --no-cache curl xz glfw-dev && \
+    curl -L https://ziglang.org/builds/zig-${ZIG_ARCH}-linux-${ZIG_VERSION}.tar.xz \
+    | tar -xJ -C /usr/local && \
+    ln -s /usr/local/zig-${ZIG_ARCH}-linux-${ZIG_VERSION}/zig /usr/local/bin/zig
+
+WORKDIR /app
+
+# Verify Zig installation
+RUN zig version
+`,
+	}
 }

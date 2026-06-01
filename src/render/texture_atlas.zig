@@ -43,6 +43,11 @@ pub const TextureAtlas = struct {
     pub fn init(allocator: std.mem.Allocator) !TextureAtlas {
         const pixels = try allocator.alloc(ColorRGBA, ATLAS_SIZE * ATLAS_SIZE);
         @memset(pixels, .{ .r = 0, .g = 0, .b = 0, .a = 0 });
+        // Set pixel (0,0) to white for fallback rendering.
+        // Tiles without valid sprite sprites use zero-area UV at (0,0)
+        // and the shader does tex * v_color, so sampling white yields
+        // the vertex color unchanged.
+        pixels[0] = .{ .r = 255, .g = 255, .b = 255, .a = 255 };
         return .{
             .allocator = allocator,
             .pixels = pixels,
@@ -133,13 +138,13 @@ pub const TextureAtlas = struct {
     }
 
     /// Load building sprites from PAK for given sprite IDs.
-    pub fn loadBuildingSprites(self: *TextureAtlas, pak: *PakFile, decoder: *BmpDecoder, ids: []const u16) !void {
+    pub fn loadBuildingSprites(self: *TextureAtlas, pak: *const PakFile, decoder: *BmpDecoder, ids: []const u16) !void {
         for (ids) |id| {
             if (id >= pak.fileCount()) continue;
             const raw = pak.getFile(id) catch continue;
             var sprite = decoder.decode(raw) catch continue;
             defer sprite.deinit(self.allocator);
-            try self.packSprite(id, &sprite);
+            _ = try self.packSprite(id, &sprite);
         }
     }
 

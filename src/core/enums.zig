@@ -5,14 +5,30 @@
 
 const std = @import("std");
 
-/// The six directions on a hex grid (pointy-top orientation).
+/// Map directions in the original Settlers / freeserf sheared-grid model.
+///
+///    A ______ B
+///     /\    /
+///    /  \  /
+/// C /____\/ D
+///
+/// RIGHT(0):      A to B  (col+1)
+/// DOWN_RIGHT(1):  A to D  (col+1, row+1)
+/// DOWN(2):        A to C  (row+1)
+/// LEFT(3):        D to C  (col-1)
+/// UP_LEFT(4):     D to A  (col-1, row-1)
+/// UP(5):          D to B  (row-1)
+///
+/// This is NOT an offset-row hex grid! The map is a regular square grid
+/// (col, row) that gets sheared into diamond/hex appearance via the
+/// isometric rendering projection: screen_x = col*32 - row*16.
 pub const Direction = enum(u3) {
     right = 0,
-    right_up = 1,
-    left_up = 2,
+    down_right = 1,
+    down = 2,
     left = 3,
-    left_down = 4,
-    right_down = 5,
+    up_left = 4,
+    up = 5,
 
     pub const count = 6;
 

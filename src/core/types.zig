@@ -6,8 +6,10 @@ const std = @import("std");
 const enums = @import("enums.zig");
 
 /// A position on the game map, stored as a packed u32.
-/// The map is a hex grid stored in a flat array.
-/// MapPos encodes the row and column into a single integer.
+/// The map uses the original Settlers (freeserf C++) sheared-grid model:
+/// a regular square grid of (col, row) where each tile is a rhombus
+/// rendered as a diamond in isometric projection.
+/// MapPos encodes col and row into a single integer: (row * width + col).
 pub const MapPos = packed struct(u32) {
     x: u16,
     y: u16,
@@ -33,33 +35,32 @@ pub const MapPos = packed struct(u32) {
     }
 
     /// Move one step in the given direction.
-    /// Note: This is a simplified hex movement — the actual Settlers
-    /// hex grid uses an offset-row layout.
+    /// Uses the C++ freeserf sheared-grid model (map-geometry.h):
+    ///   Right(0):   col+1
+    ///   DownRight(1): col+1, row+1
+    ///   Down(2):     row+1
+    ///   Left(3):    col-1
+    ///   UpLeft(4):  col-1, row-1
+    ///   Up(5):      row-1
+    /// The rendering projection (screen_x = col*32 - row*16, screen_y = row*20)
+    /// turns this into a hex-like diamond layout. There is NO row-parity
+    /// offset logic — the shear is purely in the rendering projection.
     pub fn move(self: MapPos, dir: enums.Direction) MapPos {
         var x = self.x;
         var y = self.y;
-        const is_odd_row = (y & 1) == 1;
         switch (dir) {
-            .right => x += 1,
-            .right_up => {
-                if (is_odd_row) x += 1;
-                if (y > 0) y -= 1;
+            .right     => x +%= 1,
+            .down_right => {
+                x +%= 1;
+                y +%= 1;
             },
-            .left_up => {
-                if (!is_odd_row and x > 0) x -= 1;
-                if (y > 0) y -= 1;
+            .down      => y +%= 1,
+            .left      => x -%= 1,
+            .up_left   => {
+                x -%= 1;
+                y -%= 1;
             },
-            .left => {
-                if (x > 0) x -= 1;
-            },
-            .left_down => {
-                if (!is_odd_row and x > 0) x -= 1;
-                y += 1;
-            },
-            .right_down => {
-                if (is_odd_row) x += 1;
-                y += 1;
-            },
+            .up        => y -%= 1,
         }
         return .{ .x = x, .y = y };
     }
@@ -193,7 +194,7 @@ test "Mat4 ortho" {
 test "Direction opposite" {
     try std.testing.expectEqual(enums.Direction.left, enums.Direction.right.opposite());
     try std.testing.expectEqual(enums.Direction.right, enums.Direction.left.opposite());
-    try std.testing.expectEqual(enums.Direction.right_down, enums.Direction.left_up.opposite());
+    try std.testing.expectEqual(enums.Direction.down_right, enums.Direction.up_left.opposite());
 }
 
 test "GameObjectIndex invalid" {
