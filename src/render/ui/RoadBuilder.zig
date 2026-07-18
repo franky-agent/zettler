@@ -27,8 +27,7 @@ fn hexDist(a: MapPos, b: MapPos) i32 {
 fn bestStep(from: MapPos, to: MapPos, map: *Map) ?Direction {
     var best_dir: ?Direction = null;
     var best_d: i32 = std.math.maxInt(i32);
-    inline for (std.meta.fields(Direction)) |field| {
-        const d: Direction = @enumFromInt(field.value);
+    inline for (std.meta.tags(Direction)) |d| {
         const np = from.move(d);
         if (map.isValidPos(np)) {
             if (np.eql(to)) return d;

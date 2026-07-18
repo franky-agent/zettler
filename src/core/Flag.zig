@@ -88,8 +88,7 @@ pub const FlagManager = struct {
     /// Uses BFS through the road network.
     pub fn findDirectionToFlag(flag: *FlagState, target_flag_idx: GameObjectIndex) ?Direction {
         // Simple linear scan — for now, just check direct connections
-        inline for (std.meta.fields(Direction)) |field| {
-            const dir: Direction = @enumFromInt(field.value);
+        inline for (std.meta.tags(Direction)) |dir| {
             if (flag.next[@intFromEnum(dir)].isValid() and
                 flag.next[@intFromEnum(dir)].index == target_flag_idx.index)
             {

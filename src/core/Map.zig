@@ -162,8 +162,7 @@ pub const Map = struct {
     /// Get all 6 neighboring positions (some may be invalid).
     pub fn getAllNeighbors(self: Map, pos: MapPos) [6]MapPos {
         var result: [6]MapPos = @splat(MapPos.invalid);
-        inline for (std.meta.fields(Direction), 0..) |field, i| {
-            const dir: Direction = @enumFromInt(field.value);
+        inline for (std.meta.tags(Direction), 0..) |dir, i| {
             result[i] = self.getNeighbor(pos, dir);
         }
         return result;
@@ -171,8 +170,7 @@ pub const Map = struct {
 
     /// Find the direction from one tile to an adjacent tile.
     pub fn directionTo(self: Map, from: MapPos, to: MapPos) ?Direction {
-        inline for (std.meta.fields(Direction)) |field| {
-            const dir: Direction = @enumFromInt(field.value);
+        inline for (std.meta.tags(Direction)) |dir| {
             const neighbor = from.move(dir);
             if (self.isValidPos(neighbor) and neighbor.eql(to)) return dir;
         }

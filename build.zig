@@ -73,10 +73,6 @@ pub fn build(b: *std.Build) void {
     run_step.dependOn(&run_cmd.step);
     run_cmd.step.dependOn(b.getInstallStep());
 
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
-
     // Test step for core module
     const core_tests = b.addTest(.{
         .root_module = core_mod,
