@@ -126,6 +126,109 @@ pub const Map = struct {
         self.tiles = &.{};
     }
 
+    // ── Map file persistence (.zmap) ─────────────────────────────────
+    //
+    // The map file format is a simple binary blob so that a generated world
+    // can be reproduced exactly across runs:
+    //
+    //   offset  size  field
+    //   0       4     magic   = "ZMAP"
+    //   4       2     width   (u16 little-endian)
+    //   6       2     height  (u16 little-endian)
+    //   8       8     seed    (u64 little-endian, informational)
+    //   16      4     tile_count (u32 little-endian = width*height)
+    //   20      N     tiles   (raw @asBytes of the Tile array)
+    //
+    // The Tile struct is packed-enough (only fixed-size integer/enum/bool
+    // fields, no pointers) that its in-memory layout is stable within a
+    // build, so we dump it verbatim. Loading validates the header and copies
+    // the tile bytes back into a freshly allocated tile slice.
+
+    /// Magic bytes identifying a zettler map file ("ZMAP").
+    pub const file_magic: [4]u8 = .{ 'Z', 'M', 'A', 'P' };
+    /// Version of the map file format stored in the header.
+    pub const file_version: u32 = 1;
+
+    /// Serialize the map (dimensions + raw tile bytes) to `path`.
+    /// Overwrites any existing file. Returns an error on I/O failure or if
+    /// the map has no tiles. Uses the C/POSIX file API directly because
+    /// `std.fs.cwd()` is unavailable in this Zig build.
+    pub fn saveToFile(self: Map, path: []const u8, seed: u64) !void {
+        if (self.tiles.len == 0) return error.EmptyMap;
+
+        // NUL-terminate the path for the C API.
+        const c_path = try self.allocator.alloc(u8, path.len + 1);
+        defer self.allocator.free(c_path);
+        @memcpy(c_path[0..path.len], path);
+        c_path[path.len] = 0;
+
+        // O_WRONLY | O_CREAT | O_TRUNC
+        const fd = @as(c_int, @intCast(std.c.open(@ptrCast(c_path.ptr), .{
+            .ACCMODE = .WRONLY,
+            .CREAT = true,
+            .TRUNC = true,
+        })));
+        if (fd < 0) return error.SaveFailed;
+        defer _ = std.c.close(fd);
+
+        var buf: [28]u8 = undefined;
+        @memcpy(buf[0..4], &file_magic);
+        std.mem.writeInt(u16, buf[4..6], self.width, .little);
+        std.mem.writeInt(u16, buf[6..8], self.height, .little);
+        std.mem.writeInt(u64, buf[8..16], seed, .little);
+        std.mem.writeInt(u32, buf[16..20], file_version, .little);
+        std.mem.writeInt(u32, buf[20..24], @intCast(self.tiles.len), .little);
+        // 4 bytes padding for alignment / future use.
+        std.mem.writeInt(u32, buf[24..28], 0, .little);
+        if (writeAllFd(fd, &buf) < 0) return error.WriteError;
+
+        // Raw tile bytes. Tile contains no pointers, so this is safe.
+        const tile_bytes = std.mem.sliceAsBytes(self.tiles);
+        if (writeAllFd(fd, tile_bytes) < 0) return error.WriteError;
+    }
+
+    /// Load a map from `path`, replacing the current map contents.
+    /// The receiver must already have been initialised with `Map.init` and
+    /// will be resized to the dimensions stored in the file. Returns the
+    /// seed stored in the file header.
+    pub fn loadFromFile(self: *Map, path: []const u8) !u64 {
+        const c_path = try self.allocator.alloc(u8, path.len + 1);
+        defer self.allocator.free(c_path);
+        @memcpy(c_path[0..path.len], path);
+        c_path[path.len] = 0;
+
+        // O_RDONLY = default ACCMODE
+        const fd = @as(c_int, @intCast(std.c.open(@ptrCast(c_path.ptr), .{})));
+        if (fd < 0) return error.FileNotFound;
+        defer _ = std.c.close(fd);
+
+        var hdr_buf: [28]u8 = undefined;
+        const n = readAllFd(fd, &hdr_buf);
+        if (n < hdr_buf.len) return error.TruncatedMapFile;
+
+        if (!std.mem.eql(u8, hdr_buf[0..4], &file_magic)) return error.BadMapMagic;
+        const w = std.mem.readInt(u16, hdr_buf[4..6], .little);
+        const h = std.mem.readInt(u16, hdr_buf[6..8], .little);
+        const seed = std.mem.readInt(u64, hdr_buf[8..16], .little);
+        const tile_count = std.mem.readInt(u32, hdr_buf[20..24], .little);
+        if (w == 0 or h == 0) return error.BadMapDimensions;
+        if (@as(usize, w) * @as(usize, h) != tile_count) return error.BadMapTileCount;
+
+        // Reallocate the tile slice for the file's dimensions.
+        if (self.tiles.len != tile_count) {
+            self.allocator.free(self.tiles);
+            self.tiles = try self.allocator.alloc(Tile, tile_count);
+        }
+        self.width = w;
+        self.height = h;
+
+        const tile_bytes = std.mem.sliceAsBytes(self.tiles);
+        const got = readAllFd(fd, tile_bytes);
+        if (got != tile_bytes.len) return error.TruncatedMapFile;
+
+        return seed;
+    }
+
     pub fn getTile(self: Map, pos: MapPos) *Tile {
         const idx = pos.toIndex(self.width);
         return &self.tiles[idx];
@@ -445,6 +548,48 @@ pub const Map = struct {
     }
 };
 
+// ── POSIX file helpers ─────────────────────────────────────────────
+// `std.fs.cwd()` is unavailable in this Zig build, so we use the C file API
+// directly, mirroring `readFileToAlloc` in render/app.zig.
+
+/// Write the full buffer to `fd`, looping over short writes. Returns the
+/// number of bytes written (== buf.len) on success, or a negative value on
+/// failure.
+fn writeAllFd(fd: c_int, buf: []const u8) isize {
+    var written: usize = 0;
+    while (written < buf.len) {
+        const w = std.c.write(fd, buf.ptr + written, buf.len - written);
+        if (w < 0) return w;
+        if (w == 0) return -1;
+        written += @intCast(w);
+    }
+    return @intCast(written);
+}
+
+/// Read exactly `buf.len` bytes from `fd` into `buf`, looping over short
+/// reads. Returns the number of bytes read (== buf.len) on success, or a
+/// smaller value on EOF / failure.
+fn readAllFd(fd: c_int, buf: []u8) usize {
+    var total: usize = 0;
+    while (total < buf.len) {
+        const r = std.c.read(fd, buf.ptr + total, buf.len - total);
+        if (r < 0) return total;
+        if (r == 0) break; // EOF
+        total += @intCast(r);
+    }
+    return total;
+}
+
+/// Delete a file at `path` using the POSIX unlink() C call. Best-effort:
+// ignores errors so it can be used in `defer`.
+fn deleteFileC(path: []const u8) void {
+    var c_path_buf: [4096]u8 = undefined;
+    if (path.len + 1 > c_path_buf.len) return;
+    @memcpy(c_path_buf[0..path.len], path);
+    c_path_buf[path.len] = 0;
+    _ = std.c.unlink(@ptrCast(&c_path_buf));
+}
+
 test "Map creation and access" {
     var map = try Map.init(std.testing.allocator, 64, 64);
     defer map.deinit();
@@ -538,6 +683,57 @@ test "Map wrapped neighbour wraps around edges" {
     const corner_neighbor = map.getNeighborWrapped(corner, Direction.down_right);
     try std.testing.expectEqual(@as(u16, 0), corner_neighbor.x);
     try std.testing.expectEqual(@as(u16, 0), corner_neighbor.y);
+}
+
+test "Map save/load round-trips tiles exactly" {
+    var map = try Map.init(std.testing.allocator, 32, 32);
+    defer map.deinit();
+
+    map.generateTerrain(1234);
+
+    // Mutate a few tiles so we exercise the full Tile struct.
+    map.getTileXY(5, 6).terrain = .desert;
+    map.getTileXY(7, 8).object = .tree;
+    map.getTileXY(7, 8).object_variant = 3;
+
+    const tmp_path = "test_roundtrip.zmap";
+    defer deleteFileC(tmp_path);
+
+    try map.saveToFile(tmp_path, 1234);
+
+    var loaded = try Map.init(std.testing.allocator, 1, 1);
+    defer loaded.deinit();
+    const loaded_seed = try loaded.loadFromFile(tmp_path);
+    try std.testing.expectEqual(@as(u64, 1234), loaded_seed);
+    try std.testing.expectEqual(@as(u16, 32), loaded.width);
+    try std.testing.expectEqual(@as(u16, 32), loaded.height);
+
+    // Every tile byte must match.
+    const a = std.mem.sliceAsBytes(map.tiles);
+    const b = std.mem.sliceAsBytes(loaded.tiles);
+    try std.testing.expectEqualSlices(u8, a, b);
+}
+
+test "Map load rejects bad magic" {
+    var map = try Map.init(std.testing.allocator, 8, 8);
+    defer map.deinit();
+
+    const tmp_path = "test_badmagic.zmap";
+    defer deleteFileC(tmp_path);
+    {
+        // Write a file with a bad magic header via the C API.
+        const fd = @as(c_int, @intCast(std.c.open(@ptrCast("test_badmagic.zmap"), .{
+            .ACCMODE = .WRONLY,
+            .CREAT = true,
+            .TRUNC = true,
+        })));
+        try std.testing.expect(fd >= 0);
+        defer _ = std.c.close(fd);
+        const bad_header = "XXXX\x08\x00\x08\x00\x00\x00\x00\x00\x00\x00\x00";
+        const written = writeAllFd(fd, bad_header);
+        try std.testing.expect(written == bad_header.len);
+    }
+    try std.testing.expectError(error.BadMapMagic, map.loadFromFile(tmp_path));
 }
 
 test "Map terrain generation is seamless at edges" {

@@ -191,4 +191,21 @@ pub fn build(b: *std.Build) void {
     const noise_check_run = b.addRunArtifact(noise_check_exe);
     const noise_check_step = b.step("noise-check", "Check Perlin noise output");
     noise_check_step.dependOn(&noise_check_run.step);
+
+    // Map screenshot tool — render a generated/loaded map to a BMP image.
+    const map_screenshot_exe = b.addExecutable(.{
+        .name = "map-screenshot",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/map_screenshot.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "core", .module = core_mod },
+            },
+        }),
+    });
+    map_screenshot_exe.root_module.link_libc = true;
+    const map_screenshot_run = b.addRunArtifact(map_screenshot_exe);
+    const map_screenshot_step = b.step("map-screenshot", "Render a generated/loaded map to a BMP image");
+    map_screenshot_step.dependOn(&map_screenshot_run.step);
 }

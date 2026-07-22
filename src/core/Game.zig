@@ -60,16 +60,39 @@ pub const ProductionTimes = struct {
     pub const granite_mine: u16 = 60;
 };
 
+/// Options for constructing a `Game`. Pass `.{}` for defaults.
+///
+/// `seed` drives procedural terrain generation. When null, a seed is drawn
+/// from the OS PRNG on every startup so each session gets a fresh world.
+/// `map_file`, when non-null, is loaded with `Map.loadFromFile` and overrides
+/// procedural generation entirely (the stored seed is returned in `map_seed`).
+pub const InitOptions = struct {
+    /// Terrain generation seed. `null` = random per startup.
+    seed: ?u64 = null,
+    /// Path to a `.zmap` file to load instead of generating terrain.
+    map_file: ?[]const u8 = null,
+};
+
 /// The root game object — holds all state and update logic.
 pub const Game = struct {
     allocator: std.mem.Allocator,
     state: GameState,
     pathfinder: Pathfinder,
 
+    /// Seed used to generate (or load) the current map. Useful for displaying
+    /// the seed to the player or saving a replay.
+    map_seed: u64 = 0,
+
     /// Current constant tick (50 Hz counter, not slowed by game speed).
     const_tick: u64 = 0,
 
-    pub fn init(allocator: std.mem.Allocator, map_w: u16, map_h: u16, player_count: u8) !Game {
+    pub fn init(
+        allocator: std.mem.Allocator,
+        map_w: u16,
+        map_h: u16,
+        player_count: u8,
+        opts: InitOptions,
+    ) !Game {
         var state = try GameState.init(allocator, map_w, map_h);
         errdefer state.deinit();
 
@@ -86,10 +109,46 @@ pub const Game = struct {
             .pathfinder = Pathfinder.init(allocator, &state.map),
         };
 
-        // Generate terrain
-        game.state.map.generateTerrain(42);
+        if (opts.map_file) |path| {
+            // Load the map from file; the stored seed is preserved so the
+            // session can be reproduced later.
+            if (game.state.map.loadFromFile(path)) |loaded_seed| {
+                game.map_seed = loaded_seed;
+            } else |err| {
+                std.log.warn("map file '{s}' load failed ({}), generating fresh terrain", .{ path, err });
+                const s = opts.seed orelse randomSeed();
+                game.state.map.generateTerrain(s);
+                game.map_seed = s;
+            }
+        } else {
+            // Procedural generation. A null seed means "random each startup".
+            const s = opts.seed orelse randomSeed();
+            game.state.map.generateTerrain(s);
+            game.map_seed = s;
+        }
 
         return game;
+    }
+
+    /// Draw a non-deterministic 64-bit seed so that each startup produces
+    /// a different world unless the user passes --seed. Reads 8 bytes from
+    /// `/dev/urandom` via the C file API (this Zig build lacks `std.time`);
+    /// falls back to an address-based entropy source if that fails.
+    fn randomSeed() u64 {
+        var seed_bytes: [8]u8 = undefined;
+        const fd = @as(c_int, @intCast(std.c.open("/dev/urandom", .{})));
+        if (fd >= 0) {
+            defer _ = std.c.close(fd);
+            const got = std.c.read(fd, &seed_bytes, seed_bytes.len);
+            if (got == @as(isize, @intCast(seed_bytes.len))) {
+                return std.mem.readInt(u64, &seed_bytes, .little);
+            }
+        }
+        // Fallback: mix the address of a stack variable (ASLR-entropy) with
+        // a static counter so repeated calls within one run still differ.
+        var stack_anchor: u8 = 0;
+        const addr: u64 = @intFromPtr(&stack_anchor);
+        return addr ^ 0x9E3779B97F4A7C15;
     }
 
     pub fn deinit(self: *Game) void {
@@ -517,7 +576,7 @@ pub const Game = struct {
 };
 
 test "Game init and tick" {
-    var game = try Game.init(std.testing.allocator, 32, 32, 1);
+    var game = try Game.init(std.testing.allocator, 32, 32, 1, .{ .seed = 42 });
     defer game.deinit();
 
     try std.testing.expectEqual(@as(u64, 0), game.state.tick);
@@ -526,7 +585,7 @@ test "Game init and tick" {
 }
 
 test "Game place building" {
-    var game = try Game.init(std.testing.allocator, 32, 32, 1);
+    var game = try Game.init(std.testing.allocator, 32, 32, 1, .{ .seed = 42 });
     defer game.deinit();
 
     const pos = types.MapPos{ .x = 10, .y = 10 };
@@ -547,7 +606,7 @@ test "Game production time" {
 }
 
 test "Terrain generation scatters objects" {
-    var game = try Game.init(std.testing.allocator, 48, 48, 1);
+    var game = try Game.init(std.testing.allocator, 48, 48, 1, .{ .seed = 42 });
     defer game.deinit();
     var objects: usize = 0;
     for (game.state.map.tiles) |t| {
@@ -557,7 +616,7 @@ test "Terrain generation scatters objects" {
 }
 
 test "Cannot build on a tile with an object" {
-    var game = try Game.init(std.testing.allocator, 16, 16, 1);
+    var game = try Game.init(std.testing.allocator, 16, 16, 1, .{ .seed = 42 });
     defer game.deinit();
     const pos = types.MapPos{ .x = 8, .y = 8 };
     const tile = game.state.map.getTile(pos);
@@ -569,7 +628,7 @@ test "Cannot build on a tile with an object" {
 }
 
 test "Staffed lumberjack fells a nearby tree and yields wood" {
-    var game = try Game.init(std.testing.allocator, 16, 16, 1);
+    var game = try Game.init(std.testing.allocator, 16, 16, 1, .{ .seed = 42 });
     defer game.deinit();
     game.state.players.setPlayerCount(1);
     game.state.speed = 1;
@@ -593,7 +652,7 @@ test "Staffed lumberjack fells a nearby tree and yields wood" {
 }
 
 test "buildRoad links two flags and marks the path" {
-    var game = try Game.init(std.testing.allocator, 16, 16, 1);
+    var game = try Game.init(std.testing.allocator, 16, 16, 1, .{ .seed = 42 });
     defer game.deinit();
     const a = types.MapPos{ .x = 4, .y = 4 };
     const b = types.MapPos{ .x = 6, .y = 4 };

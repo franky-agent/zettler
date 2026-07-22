@@ -44,6 +44,21 @@ pub const WINDOW_WIDTH: c_int = 1024;
 pub const WINDOW_HEIGHT: c_int = 768;
 pub const WINDOW_TITLE: [:0]const u8 = "Freeserf Zig";
 
+/// Startup options threaded from `main` into `App.init` / `Game.init`.
+///
+/// `seed` — when non-null, fixes the procedural terrain seed so the same
+///   world is produced every run. When null, a random seed is drawn per
+///   startup so maps differ between sessions.
+/// `map_file` — path to a `.zmap` file to load instead of generating a map.
+/// `save_map` — when non-null, the generated/loaded map is written to this
+///   path after `App.init`, so the session can be reproduced later with
+///   `--map-file <path>`.
+pub const AppOptions = struct {
+    seed: ?u64 = null,
+    map_file: ?[]const u8 = null,
+    save_map: ?[]const u8 = null,
+};
+
 /// A 1x1 white fallback texture for when the real atlas isn't loaded.
 /// The shader multiplies colors by texture2D, so we need a white texture
 /// for colored quads to appear (otherwise texture2D returns black).
@@ -182,9 +197,21 @@ pub const App = struct {
     view_w: f32 = @floatFromInt(WINDOW_WIDTH),
     view_h: f32 = @floatFromInt(WINDOW_HEIGHT),
 
-    pub fn init(allocator: std.mem.Allocator) !App {
-        var game_state = try Game.init(allocator, 64, 64, 1);
+    pub fn init(allocator: std.mem.Allocator, opts: AppOptions) !App {
+        var game_state = try Game.init(allocator, 64, 64, 1, .{
+            .seed = opts.seed,
+            .map_file = opts.map_file,
+        });
         errdefer game_state.deinit();
+
+        // Optionally persist the map so this exact world can be replayed.
+        if (opts.save_map) |path| {
+            game_state.state.map.saveToFile(path, game_state.map_seed) catch |err| {
+                std.log.warn("failed to save map to '{s}': {}", .{ path, err });
+            };
+            std.log.info("map saved to {s} (seed={})", .{ path, game_state.map_seed });
+        }
+        std.log.info("map seed: {}", .{game_state.map_seed});
 
         var camera = Camera{};
         camera.setViewportSize(WINDOW_WIDTH, WINDOW_HEIGHT);
