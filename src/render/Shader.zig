@@ -159,6 +159,7 @@ pub const Shader = struct {
             \\#version 120
             \\uniform mat4 u_projection;
             \\uniform mat4 u_modelview;
+            \\uniform vec2 u_offset;
             \\attribute vec2 a_position;
             \\attribute vec2 a_ground_local;
             \\attribute vec4 a_ground_region;
@@ -173,7 +174,8 @@ pub const Shader = struct {
             \\    v_ground_region = a_ground_region;
             \\    v_bary          = a_bary;
             \\    v_color         = a_color;
-            \\    gl_Position = u_projection * u_modelview * vec4(a_position, 0.0, 1.0);
+            \\    vec2 pos = a_position + u_offset;
+            \\    gl_Position = u_projection * u_modelview * vec4(pos, 0.0, 1.0);
             \\}
         ;
         const fs: [:0]const u8 =

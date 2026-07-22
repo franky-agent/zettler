@@ -22,22 +22,19 @@ fn hexDist(a: MapPos, b: MapPos) i32 {
 }
 
 /// Pick the step direction from `from` that gets closest to `to`, skipping
-/// water and buildings. Returns the direction that lands on `to` immediately if
-/// adjacent, else the best distance-reducing move, or null if all are blocked.
+/// water and buildings. Uses WRAPPING so roads can be built across map edges.
 fn bestStep(from: MapPos, to: MapPos, map: *Map) ?Direction {
     var best_dir: ?Direction = null;
     var best_d: i32 = std.math.maxInt(i32);
     inline for (std.meta.tags(Direction)) |d| {
-        const np = from.move(d);
-        if (map.isValidPos(np)) {
-            if (np.eql(to)) return d;
-            const t = map.getTile(np);
-            if (!t.has_building and !t.terrain.isWater()) {
-                const dd = hexDist(np, to);
-                if (dd < best_d) {
-                    best_d = dd;
-                    best_dir = d;
-                }
+        const np = map.getNeighborWrapped(from, d);
+        if (np.eql(to)) return d;
+        const t = map.getTile(np);
+        if (!t.has_building and !t.terrain.isWater()) {
+            const dd = hexDist(np, to);
+            if (dd < best_d) {
+                best_d = dd;
+                best_dir = d;
             }
         }
     }
@@ -108,7 +105,7 @@ pub const RoadBuilder = struct {
             }
             const d = bestStep(p, cursor_pos, map) orelse return;
             self.path[steps] = @intFromEnum(d);
-            p = p.move(d);
+            p = map.wrapPos(p.move(d));
             steps += 1;
         }
     }

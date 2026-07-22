@@ -475,6 +475,7 @@ pub const App = struct {
 
             // Render the hex map — NEAREST for pixel-exact fidelity to the
             // original DOS art (the original never blurs terrain).
+            // The map renderer draws at 9 offsets for torus wrapping.
             if (self.atlas_loaded and self.atlas.uploaded) {
                 self.atlas.setFilter(false); // nearest (binds atlas)
             } else {
@@ -489,9 +490,28 @@ pub const App = struct {
             if (self.atlas_loaded and self.atlas.uploaded) {
                 self.atlas.setFilter(false); // nearest
             }
-            self.renderWaves(const_tick);
-            self.renderRoads();
-            self.renderScene();
+            // Render objects (waves, roads, scene) at each torus offset so they
+            // wrap seamlessly along with the terrain.
+            const mw = @as(f32, @floatFromInt(self.game.state.map.width)) * map_renderer_mod.TileWidth;
+            const mh = @as(f32, @floatFromInt(self.game.state.map.height)) * map_renderer_mod.TileHeight;
+            const offsets = [9][2]f32{
+                .{ -mw, -mh }, .{ 0.0, -mh }, .{ mw, -mh },
+                .{ -mw, 0.0 }, .{ 0.0, 0.0 }, .{ mw, 0.0 },
+                .{ -mw, mh },  .{ 0.0, mh },  .{ mw, mh },
+            };
+            const saved_cx = self.camera.x;
+            const saved_cy = self.camera.y;
+            for (offsets) |off| {
+                self.camera.x = saved_cx + off[0];
+                self.camera.y = saved_cy + off[1];
+                self.camera.matrices_dirty = true;
+                self.renderWaves(const_tick);
+                self.renderRoads();
+                self.renderScene();
+            }
+            self.camera.x = saved_cx;
+            self.camera.y = saved_cy;
+            self.camera.matrices_dirty = true;
 
             // Render UI overlay (HUD + minimap + building ghost)
             if (self.show_hud and frames > 0) {
@@ -522,6 +542,10 @@ pub const App = struct {
         if (self.scroll_right) self.camera.pan(speed, 0);
         if (self.scroll_up) self.camera.pan(0, -speed);
         if (self.scroll_down) self.camera.pan(0, speed);
+        // Wrap camera within map bounds for torus scrolling
+        const mw = @as(f32, @floatFromInt(self.game.state.map.width)) * map_renderer_mod.TileWidth;
+        const mh = @as(f32, @floatFromInt(self.game.state.map.height)) * map_renderer_mod.TileHeight;
+        self.camera.wrap(mw, mh);
     }
 
     /// One drawable in the world scene: either a building (by index) or a
@@ -640,6 +664,7 @@ pub const App = struct {
     }
 
     /// Convert the current mouse position to the map tile under the cursor.
+    /// Uses wrapping so tiles across the map edge are correctly identified.
     fn mouseToTile(self: *App) core.MapPos {
         const world = self.camera.screenToWorld(@floatCast(self.mouse_x), @floatCast(self.mouse_y));
         const tw: f32 = map_renderer_mod.TileWidth;
@@ -647,14 +672,10 @@ pub const App = struct {
         const hw: f32 = tw / 2.0;
         const row_f = world.y / th;
         const col_f = (world.x + row_f * hw) / tw;
-        var col: i32 = @intFromFloat(@round(col_f));
-        var row: i32 = @intFromFloat(@round(row_f));
+        const col: i32 = @intFromFloat(@round(col_f));
+        const row: i32 = @intFromFloat(@round(row_f));
         const map = &self.game.state.map;
-        if (col < 0) col = 0;
-        if (row < 0) row = 0;
-        if (col >= map.width) col = map.width - 1;
-        if (row >= map.height) row = map.height - 1;
-        return .{ .x = @intCast(col), .y = @intCast(row) };
+        return .{ .x = map.wrapX(col), .y = map.wrapY(row) };
     }
 
     /// Draw roads (segments between connected road/flag tiles), flag posts, and
@@ -666,6 +687,7 @@ pub const App = struct {
 
         // Road segments: for each road/flag tile, connect to forward neighbours
         // that are also road/flag (forward dirs only, to avoid drawing twice).
+        // Uses WRAPPING so roads draw correctly across map edges.
         const fwd = [_]core.Direction{ .right, .down_right, .down };
         for (0..map.height) |yy| {
             for (0..map.width) |xx| {
@@ -674,8 +696,7 @@ pub const App = struct {
                 if (!(t.has_road or t.has_flag)) continue;
                 const c0 = self.tileCenter(pos);
                 for (fwd) |d| {
-                    const np = map.getNeighbor(pos, d);
-                    if (!map.isValidPos(np)) continue;
+                    const np = map.getNeighborWrapped(pos, d);
                     const nt = map.getTile(np);
                     if (!(nt.has_road or nt.has_flag)) continue;
                     const c1 = self.tileCenter(np);
@@ -800,9 +821,8 @@ pub const App = struct {
         // whose whole footprint is also water, otherwise the sprite "floods" the
         // adjacent grass. Shoreline water stays static (no spill).
         const isWater = struct {
-            fn at(m: *core.map.Map, x: usize, y: usize) bool {
-                if (x >= m.width or y >= m.height) return false;
-                return m.getTileXY(@intCast(x), @intCast(y)).terrain == .water;
+            fn at(m: *core.map.Map, x: i32, y: i32) bool {
+                return m.getTileWrapped(x, y).terrain == .water;
             }
         }.at;
 
@@ -813,8 +833,11 @@ pub const App = struct {
                 const tile = map.getTileXY(@intCast(xx), @intCast(yy));
                 if (tile.terrain != .water) continue;
                 // Skip shoreline tiles to avoid waves spilling onto land.
-                if (!isWater(map, xx + 1, yy) or !isWater(map, xx, yy + 1) or
-                    !isWater(map, xx + 1, yy + 1)) continue;
+                // Uses wrapping so edge water checks neighbours across the seam.
+                const xxi: i32 = @intCast(xx);
+                const yyi: i32 = @intCast(yy);
+                if (!isWater(map, xxi + 1, yyi) or !isWater(map, xxi, yyi + 1) or
+                    !isWater(map, xxi + 1, yyi + 1)) continue;
                 const pos: u64 = @as(u64, yy) * map.width + xx;
                 const frame: u16 = @intCast(((pos ^ 5) + (tick >> 3)) & 0xf);
                 const entry = self.atlas.get(630 + frame) orelse continue;
@@ -1210,6 +1233,12 @@ fn onMouseButton(_: *glfw.GLFWwindow, button: c_int, action: c_int, _: c_int) ca
                     const wx = @as(f32, @floatFromInt(map_pos.x)) * tw - @as(f32, @floatFromInt(map_pos.y)) * hw;
                     const wy = @as(f32, @floatFromInt(map_pos.y)) * 20.0;
                     app.camera.centerOn(wx, wy);
+                    // Wrap camera to stay within map bounds
+                    {
+                        const mw2 = @as(f32, @floatFromInt(app.game.state.map.width)) * map_renderer_mod.TileWidth;
+                        const mh2 = @as(f32, @floatFromInt(app.game.state.map.height)) * map_renderer_mod.TileHeight;
+                        app.camera.wrap(mw2, mh2);
+                    }
                 }
             }
         }
@@ -1231,7 +1260,10 @@ fn onCursorPos(_: *glfw.GLFWwindow, xpos: f64, ypos: f64) callconv(.c) void {
             const dy = @as(f32, @floatCast(ypos - app.mouse_drag_start_y));
             app.camera.x = app.cam_drag_start_x - dx / app.camera.zoom;
             app.camera.y = app.cam_drag_start_y + dy / app.camera.zoom;
-            app.camera.matrices_dirty = true;
+            // Wrap camera within map bounds for torus scrolling
+            const mw = @as(f32, @floatFromInt(app.game.state.map.width)) * map_renderer_mod.TileWidth;
+            const mh = @as(f32, @floatFromInt(app.game.state.map.height)) * map_renderer_mod.TileHeight;
+            app.camera.wrap(mw, mh);
         }
         // Keep the road-building preview path in sync with the cursor.
         if (app.road_builder.active and app.road_builder.has_start) {

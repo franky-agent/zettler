@@ -2,6 +2,8 @@
 //!
 //! Handles scrolling, zooming, and map-to-screen coordinate transforms.
 //! The game uses a 2D orthographic camera that scrolls around the hex grid.
+//! Supports torus wrapping: the camera position wraps within map bounds
+//! so the world appears seamlessly infinite.
 
 const std = @import("std");
 const gl = @import("gl.zig");
@@ -90,6 +92,20 @@ pub const Camera = struct {
     pub fn centerOn(self: *Camera, world_x: f32, world_y: f32) void {
         self.x = world_x;
         self.y = world_y;
+        self.matrices_dirty = true;
+    }
+
+    /// Wrap camera position so it stays within the map boundaries,
+    /// creating a torus (infinite-scroll) effect. Call after panning.
+    /// map_w and map_h are the map dimensions in pixels.
+    pub fn wrap(self: *Camera, map_w: f32, map_h: f32) void {
+        if (map_w <= 0 or map_h <= 0) return;
+        // Wrap using modular arithmetic with fmod semantics
+        self.x = @mod(self.x, map_w);
+        self.y = @mod(self.y, map_h);
+        // Ensure positive values (mod can return negative for negative inputs)
+        if (self.x < 0) self.x += map_w;
+        if (self.y < 0) self.y += map_h;
         self.matrices_dirty = true;
     }
 };

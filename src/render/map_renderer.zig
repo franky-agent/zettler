@@ -5,6 +5,11 @@
 //!   screen_x = col * TileWidth  - row * (TileWidth/2)
 //!   screen_y = row * TileHeight
 //!
+//! TORUS WRAPPING: The map wraps seamlessly — scrolling past the right edge
+//! shows the left edge, past the bottom shows the top, etc. The renderer
+//! draws the map at up to 4 offsets (the 3 wrap-around copies) so the
+//! world appears infinite and connected.
+//!
 //! In the original C++ code, terrain sprites (AssetMapGround) are fully
 //! opaque solid rectangles (SpriteTypeSolid). The diamond shape comes from
 //! a separate mask system (AssetMapMaskUp/AssetMapMaskDown) that clips each
@@ -73,12 +78,21 @@ fn terrainColor(t: Terrain) [4]f32 {
 /// is pushed up the screen, so hills rise and valleys sink.
 pub const HEIGHT_SCALE: f32 = 4.0;
 
-/// Height (in tile units) at a map position, clamped to the map bounds so edge
-/// tiles reuse the nearest in-bounds height instead of reading out of range.
-fn heightAt(map: *Map, x: usize, y: usize) f32 {
-    const xx: u16 = @intCast(@min(x, @as(usize, map.width) - 1));
-    const yy: u16 = @intCast(@min(y, @as(usize, map.height) - 1));
-    return @floatFromInt(map.getTileXY(xx, yy).height);
+/// Height (in tile units) at a map position using WRAPPING, so tiles at the
+/// edge correctly reference tiles from the opposite side for seamless height.
+fn heightAtWrapped(map: *Map, x: i32, y: i32) f32 {
+    return @floatFromInt(map.getTileWrapped(x, y).height);
+}
+
+/// Per-vertex brightness multiplier from the local height gradient (slope) dotted
+/// with a fixed light direction. Flat ground → ~SHADE_AMBIENT; slopes facing the
+/// light brighten, slopes facing away darken — the shaded-relief effect.
+/// Uses wrapping so edges are lit correctly.
+fn shadeAtWrapped(map: *Map, x: i32, y: i32) f32 {
+    const dhx = heightAtWrapped(map, x + 1, y) - heightAtWrapped(map, x - 1, y);
+    const dhy = heightAtWrapped(map, x, y + 1) - heightAtWrapped(map, x, y - 1);
+    const ndl = SHADE_LX * (-dhx) + SHADE_LY * (-dhy);
+    return @max(SHADE_MIN, @min(SHADE_MAX, SHADE_AMBIENT + SHADE_DIFFUSE * ndl));
 }
 
 // Directional-light shading constants. Light from the upper-left.
@@ -88,18 +102,6 @@ const SHADE_LX: f32 = 1.0;
 const SHADE_LY: f32 = 1.0;
 const SHADE_MIN: f32 = 0.6;
 const SHADE_MAX: f32 = 1.25;
-
-/// Per-vertex brightness multiplier from the local height gradient (slope) dotted
-/// with a fixed light direction. Flat ground → ~SHADE_AMBIENT; slopes facing the
-/// light brighten, slopes facing away darken — the shaded-relief effect.
-fn shadeAt(map: *Map, x: usize, y: usize) f32 {
-    const xl = if (x > 0) x - 1 else x;
-    const yu = if (y > 0) y - 1 else y;
-    const dhx = heightAt(map, x + 1, y) - heightAt(map, xl, y);
-    const dhy = heightAt(map, x, y + 1) - heightAt(map, x, yu);
-    const ndl = SHADE_LX * (-dhx) + SHADE_LY * (-dhy);
-    return @max(SHADE_MIN, @min(SHADE_MAX, SHADE_AMBIENT + SHADE_DIFFUSE * ndl));
-}
 
 /// Per-vertex tint (v_color.rgb). The shader does `mix(tint, px*tint, ca)`, so for
 /// a textured tile (ca=1) the tint is the brightness applied to the sprite → grey
@@ -111,19 +113,20 @@ fn cornerTint(fb: [4]f32, ca: f32, s: f32) [3]f32 {
 }
 
 /// True if tile (x,y) borders a tile of a different terrain type (any of the 8
-/// neighbours). Such tiles get the dithered overlay so transitions are stippled;
-/// interior uniform tiles render only the clean solid base.
-fn isTerrainBoundary(map: *Map, x: usize, y: usize) bool {
+/// neighbours). Uses wrapping so edge tiles correctly detect boundaries across
+/// the wrap seam.
+fn isTerrainBoundaryWrapped(map: *Map, x: usize, y: usize) bool {
     const t = map.getTileXY(@intCast(x), @intCast(y)).terrain;
+    const xi: i32 = @intCast(x);
+    const yi: i32 = @intCast(y);
     var dy: i32 = -1;
     while (dy <= 1) : (dy += 1) {
         var dx: i32 = -1;
         while (dx <= 1) : (dx += 1) {
             if (dx == 0 and dy == 0) continue;
-            const nx = @as(i32, @intCast(x)) + dx;
-            const ny = @as(i32, @intCast(y)) + dy;
-            if (nx < 0 or ny < 0 or nx >= map.width or ny >= map.height) continue;
-            if (map.getTileXY(@intCast(nx), @intCast(ny)).terrain != t) return true;
+            const nx = map.wrapX(xi + dx);
+            const ny = map.wrapY(yi + dy);
+            if (map.getTileXY(nx, ny).terrain != t) return true;
         }
     }
     return false;
@@ -155,8 +158,6 @@ fn emitTri(verts: []MapRenderer.Vertex, idx: []u16, base: u16,
     const x0 = gx + (ax - gx) * expand; const y0 = gy + (ay - gy) * expand;
     const x1 = gx + (bx - gx) * expand; const y1 = gy + (by - gy) * expand;
     const x2 = gx + (cx - gx) * expand; const y2 = gy + (cy - gy) * expand;
-    // Per-vertex tint (c0,c1,c2) so the overlay shades smoothly like the base,
-    // instead of a flat single-brightness triangle.
     verts[0] = mkVert(x0, y0, x0 / TileWidth, y0 / TileHeight, eu, ev, euw, evh, 1, 0, c0[0], c0[1], c0[2], a);
     verts[1] = mkVert(x1, y1, x1 / TileWidth, y1 / TileHeight, eu, ev, euw, evh, 0, 1, c1[0], c1[1], c1[2], a);
     verts[2] = mkVert(x2, y2, x2 / TileWidth, y2 / TileHeight, eu, ev, euw, evh, 0, 0, c2[0], c2[1], c2[2], a);
@@ -165,7 +166,7 @@ fn emitTri(verts: []MapRenderer.Vertex, idx: []u16, base: u16,
     idx[2] = base + 2;
 }
 
-/// MapRenderer — draws terrain tiles.
+/// MapRenderer — draws terrain tiles with torus wrapping.
 pub const MapRenderer = struct {
     shader: Shader = .{},
     vbo: gl.GLuint = 0,           // base pass: clean gap-free parallelograms (all tiles)
@@ -178,6 +179,11 @@ pub const MapRenderer = struct {
     overlay_index_count: usize = 0,
     initialized: bool = false,
     has_atlas: bool = false,
+
+    // Torus wrapping: world-space size of one full map in pixels.
+    // Used to offset copies when rendering.
+    map_pixel_width: f32 = 0,
+    map_pixel_height: f32 = 0,
 
     // Terrain vertex (matches Shader.createMaskedTerrain):
     //   position(x,y), ground_local(gl_u,gl_v), ground_region(gr_*),
@@ -243,6 +249,15 @@ pub const MapRenderer = struct {
         if (self.overlay_vbo == 0) self.overlay_vbo = gl.genBuffers(1);
         if (self.overlay_ibo == 0) self.overlay_ibo = gl.genBuffers(1);
 
+        // Compute the world-space size of one full map for torus rendering.
+        // In isometric projection: the rightmost column is at screen_x = (width-1)*TileWidth
+        // and the bottom row at screen_y = (height-1)*TileHeight. The map spans
+        // approximately width*TileWidth in x and height*TileHeight in y (the x offset
+        // from the sheared projection makes it a bit wider, but for wrapping we need
+        // the full repeat distance in screen space).
+        self.map_pixel_width = @as(f32, @floatFromInt(map.width)) * TileWidth;
+        self.map_pixel_height = @as(f32, @floatFromInt(map.height)) * TileHeight;
+
         const num_tiles = map.tileCount();
         const allocator = std.heap.page_allocator;
         // BASE: every tile is a clean, gap-free parallelogram (4 verts P,R,Dn,DR +
@@ -265,11 +280,11 @@ pub const MapRenderer = struct {
 
         const hw = TileWidth / 2.0; // 16
         const EXPAND: f32 = 1.7; // how far overlay triangles bleed into neighbours
-        // (wider bleed + smoothstep density ramp in the shader = a gradual,
-        //  smooth dithered dissolve at terrain boundaries, like the C# masks).
 
         for (0..map.height) |y| {
             for (0..map.width) |x| {
+                const xi: i32 = @intCast(x);
+                const yi: i32 = @intCast(y);
                 const ti = y * map.width + x;
 
                 const lx = @as(f32, @floatFromInt(x)) * TileWidth -
@@ -279,10 +294,11 @@ pub const MapRenderer = struct {
                 const tile = map.getTileXY(@intCast(x), @intCast(y));
 
                 // Per-vertex 2.5D relief from the four rhombus grid heights.
-                const hP = HEIGHT_SCALE * heightAt(map, x, y);
-                const hR = HEIGHT_SCALE * heightAt(map, x + 1, y);
-                const hDn = HEIGHT_SCALE * heightAt(map, x, y + 1);
-                const hDR = HEIGHT_SCALE * heightAt(map, x + 1, y + 1);
+                // Uses WRAPPING so edge tiles reference heights across the seam.
+                const hP = HEIGHT_SCALE * heightAtWrapped(map, xi, yi);
+                const hR = HEIGHT_SCALE * heightAtWrapped(map, xi + 1, yi);
+                const hDn = HEIGHT_SCALE * heightAtWrapped(map, xi, yi + 1);
+                const hDR = HEIGHT_SCALE * heightAtWrapped(map, xi + 1, yi + 1);
 
                 // Rhombus corners (screen space):
                 const Px = lx;             const Py = ly - hP;
@@ -302,10 +318,10 @@ pub const MapRenderer = struct {
 
                 // Per-corner brightness from the height slope; tint per corner:
                 // textured → (s,s,s); water (no sprite) → fallback*s.
-                const cP = cornerTint(fb, ca, shadeAt(map, x, y));
-                const cR = cornerTint(fb, ca, shadeAt(map, x + 1, y));
-                const cDn = cornerTint(fb, ca, shadeAt(map, x, y + 1));
-                const cDR = cornerTint(fb, ca, shadeAt(map, x + 1, y + 1));
+                const cP = cornerTint(fb, ca, shadeAtWrapped(map, xi, yi));
+                const cR = cornerTint(fb, ca, shadeAtWrapped(map, xi + 1, yi));
+                const cDn = cornerTint(fb, ca, shadeAtWrapped(map, xi, yi + 1));
+                const cDR = cornerTint(fb, ca, shadeAtWrapped(map, xi + 1, yi + 1));
 
                 // ── BASE parallelogram: verts P,R,Dn,DR; UP=(P,Dn,DR) DOWN=(P,R,DR).
                 // Ground UV is screen-space (x/32, y/20) so the flat sprite tiles
@@ -324,9 +340,8 @@ pub const MapRenderer = struct {
                 base_i[bii + 5] = @intCast(bvi + 3); //       DR
 
                 // ── OVERLAY: only boundary tiles get the dithered transition ──
-                // The overlay always uses the flat variant + screen-space UV; its tint
-                // is the apex-corner colour so it matches the base near that vertex.
-                if (isTerrainBoundary(map, x, y)) {
+                // Uses wrapping-aware boundary check.
+                if (isTerrainBoundaryWrapped(map, x, y)) {
                     var ou: f32 = 0; var ov: f32 = 0; var ouw: f32 = 0; var ovh: f32 = 0;
                     if (atlas) |a| {
                         if (terrainSpriteId(tile.terrain)) |sid| {
@@ -363,36 +378,60 @@ pub const MapRenderer = struct {
         self.initialized = true;
     }
 
+    /// Render the terrain with torus wrapping.
+    ///
+    /// Draws the map at 9 offsets (a 3×3 grid around the camera) so that
+    /// wherever the camera is, the visible area is fully covered with
+    /// seamless wrapping tiles. The GPU clips offscreen geometry.
     pub fn render(self: *MapRenderer, camera: *Camera) void {
         if (!self.initialized) return;
-        self.shader.use();
-        self.shader.setTexture(0);
-        self.shader.setColor(1, 1, 1, 1);
-        self.shader.setOffset(0, 0);
+
+        const mw = self.map_pixel_width;
+        const mh = self.map_pixel_height;
+        if (mw <= 0 or mh <= 0) return;
+
+        // 3×3 grid of offsets ensures seamless wrapping in all directions.
+        // When the camera is near the left/top edge, we need negative offsets
+        // to cover the viewport extending past the wrap seam.
+        const offsets = [9][2]f32{
+            .{ -mw, -mh }, .{ 0.0, -mh }, .{ mw, -mh },
+            .{ -mw, 0.0 }, .{ 0.0, 0.0 }, .{ mw, 0.0 },
+            .{ -mw, mh },  .{ 0.0, mh },  .{ mw, mh },
+        };
+
         camera.updateMatrices();
-        self.shader.setProjection(&camera.projection);
-        self.shader.setModelview(&camera.modelview);
 
         // Layout: pos(0) ground_local(8) ground_region(16) bary(32) color(40)
         // 14 floats = 56 bytes.
         const stride: i32 = @sizeOf(Vertex);
 
-        // Pass 1: clean solid base over ALL tiles (crisp diagonal boundaries).
+        // Set up GL state once — projection and modelview don't change per offset.
+        self.shader.use();
+        self.shader.setTexture(0);
+        self.shader.setColor(1, 1, 1, 1);
+        self.shader.setProjection(&camera.projection);
+        self.shader.setModelview(&camera.modelview);
+
+        // Pass 1: Base terrain (all tiles) at all 9 offsets.
         self.shader.setUseMask(0);
         gl.bindBuffer(gl.GL_ARRAY_BUFFER, self.vbo);
         bindTerrainAttribs(stride);
         gl.bindBuffer(gl.GL_ELEMENT_ARRAY_BUFFER, self.ibo);
-        gl.drawElements(gl.GL_TRIANGLES, @intCast(self.index_count), gl.GL_UNSIGNED_SHORT, 0);
+        for (offsets) |off| {
+            self.shader.setOffset(off[0], off[1]);
+            gl.drawElements(gl.GL_TRIANGLES, @intCast(self.index_count), gl.GL_UNSIGNED_SHORT, 0);
+        }
 
-        // Pass 2: procedurally-dithered overlay over BOUNDARY tiles only. The
-        // expanded triangles bleed into neighbours and the shader fades them out
-        // with an ordered dither, revealing the base → clean stippled transitions.
+        // Pass 2: Overlay (boundary tiles only) at all 9 offsets.
         if (self.overlay_index_count > 0) {
             self.shader.setUseMask(1);
             gl.bindBuffer(gl.GL_ARRAY_BUFFER, self.overlay_vbo);
             bindTerrainAttribs(stride);
             gl.bindBuffer(gl.GL_ELEMENT_ARRAY_BUFFER, self.overlay_ibo);
-            gl.drawElements(gl.GL_TRIANGLES, @intCast(self.overlay_index_count), gl.GL_UNSIGNED_SHORT, 0);
+            for (offsets) |off| {
+                self.shader.setOffset(off[0], off[1]);
+                gl.drawElements(gl.GL_TRIANGLES, @intCast(self.overlay_index_count), gl.GL_UNSIGNED_SHORT, 0);
+            }
         }
 
         gl.disableVertexAttribArray(0);

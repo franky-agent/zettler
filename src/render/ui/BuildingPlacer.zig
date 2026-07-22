@@ -73,15 +73,10 @@ pub const BuildingPlacer = struct {
         // col = (screen_x + row * HalfTileWidth) / TileWidth
         const row_f = world.y / TileHeight;
         const col_f = (world.x + row_f * HalfTileWidth) / TileWidth;
+        const col: i32 = @intFromFloat(@round(col_f));
+        const row: i32 = @intFromFloat(@round(row_f));
 
-        var col: i32 = @intFromFloat(@round(col_f));
-        var row: i32 = @intFromFloat(@round(row_f));
-        if (col < 0) col = 0;
-        if (row < 0) row = 0;
-        if (col >= map.width) col = map.width - 1;
-        if (row >= map.height) row = map.height - 1;
-
-        self.ghost_pos = .{ .x = @intCast(col), .y = @intCast(row) };
+        self.ghost_pos = .{ .x = map.wrapX(col), .y = map.wrapY(row) };
 
         // Validate terrain — must match Game.placeBuilding exactly so the
         // green/red ghost reflects what will actually be allowed. Mines go on

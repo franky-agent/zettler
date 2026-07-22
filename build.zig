@@ -157,4 +157,38 @@ pub fn build(b: *std.Build) void {
     const check_alpha_run = b.addRunArtifact(check_alpha_exe);
     const check_alpha_step = b.step("check-alpha", "Check terrain sprite alpha/transparency");
     check_alpha_step.dependOn(&check_alpha_run.step);
+
+    // Terrain histogram (debug tool for terrain generation tuning)
+    const terrain_hist_exe = b.addExecutable(.{
+        .name = "terrain-hist",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/terrain_hist.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "core", .module = core_mod },
+            },
+        }),
+    });
+    terrain_hist_exe.root_module.link_libc = true;
+    const terrain_hist_run = b.addRunArtifact(terrain_hist_exe);
+    const terrain_hist_step = b.step("terrain-hist", "Print terrain type distribution");
+    terrain_hist_step.dependOn(&terrain_hist_run.step);
+
+    // Noise check (debug)
+    const noise_check_exe = b.addExecutable(.{
+        .name = "noise-check",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/noise_check.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "core", .module = core_mod },
+            },
+        }),
+    });
+    noise_check_exe.root_module.link_libc = true;
+    const noise_check_run = b.addRunArtifact(noise_check_exe);
+    const noise_check_step = b.step("noise-check", "Check Perlin noise output");
+    noise_check_step.dependOn(&noise_check_run.step);
 }

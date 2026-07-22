@@ -16,6 +16,7 @@ pub const building = @import("Building.zig");
 pub const player = @import("Player.zig");
 pub const flag = @import("Flag.zig");
 pub const game = @import("Game.zig");
+pub const noise = @import("Noise.zig");
 
 pub const Direction = enums.Direction;
 pub const Resource = enums.Resource;

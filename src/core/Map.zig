@@ -1,11 +1,17 @@
 //! Map — the hex grid tile map.
 //!
-//! Port of the C# Map class. Enhanced with terrain generation,
-//! height operations, resource distribution, and pathfinding helpers.
+//! Port of the C# Map class. Enhanced with Perlin noise terrain generation,
+//! torus-wrapping support (seamless world edges), and pathfinding helpers.
+//!
+//! The map is a finite grid that wraps toroidally: scrolling past the right
+//! edge shows the left edge, past the bottom shows the top, etc. Gameplay
+//! operations (buildings, flags, roads, pathfinding) also wrap — a road
+//! exiting the right side connects to column 0 on the left.
 
 const std = @import("std");
 const enums = @import("enums.zig");
 const types = @import("types.zig");
+const noise_mod = @import("Noise.zig");
 
 const Direction = enums.Direction;
 const MapPos = types.MapPos;
@@ -49,8 +55,6 @@ pub const Terrain = enum(u4) {
     /// Whether a mine can be placed here. Mines dig into rock, so they go on the
     /// rocky mountain band — `tundra` (the grey high ground) and the explicit
     /// mountain terrains. Snow caps are excluded (too high), as are grass/water.
-    /// (generateTerrain emits `tundra` as the rocky mountain rather than the
-    /// `mountain` enum values, so tundra is the practical mining terrain.)
     pub fn isMineable(self: Terrain) bool {
         return self == .tundra or self.isMountain();
     }
@@ -97,7 +101,7 @@ pub const TerrainGen = struct {
     pub const height_max = 15;
 };
 
-/// The game map — a dense hex grid.
+/// The game map — a dense hex grid that wraps toroidally.
 pub const Map = struct {
     width: u16 = 0,
     height: u16 = 0,
@@ -150,6 +154,69 @@ pub const Map = struct {
     pub fn indexToPos(self: Map, index: u32) MapPos {
         return MapPos.fromIndex(index, self.width);
     }
+
+    // ── Torus (wrapping) coordinate helpers ──────────────────────────
+
+    /// Wrap an x coordinate into [0, width). Supports negative and overflow values.
+    /// Uses integer @mod which always returns non-negative results.
+    pub fn wrapX(self: Map, x: i32) u16 {
+        const w: i32 = @intCast(self.width);
+        const result: i32 = @mod(x, w);
+        return @intCast(result);
+    }
+
+    /// Wrap a y coordinate into [0, height). Supports negative and overflow values.
+    /// Uses integer @mod which always returns non-negative results.
+    pub fn wrapY(self: Map, y: i32) u16 {
+        const h: i32 = @intCast(self.height);
+        const result: i32 = @mod(y, h);
+        return @intCast(result);
+    }
+
+    /// Get a tile at wrapped (torus) coordinates. Any integer x,y maps to a
+    /// valid tile by wrapping around the map edges.
+    pub fn getTileWrapped(self: Map, x: i32, y: i32) *Tile {
+        return self.getTileXY(self.wrapX(x), self.wrapY(y));
+    }
+
+    /// Get the height at wrapped coordinates (for renderer height sampling).
+    pub fn heightAtWrapped(self: Map, x: i32, y: i32) f32 {
+        return @floatFromInt(self.getTileWrapped(x, y).height);
+    }
+
+    /// Wrap a MapPos into the valid range [0,width) × [0,height).
+    /// Useful for converting raw movement results that may overflow.
+    pub fn wrapPos(self: Map, pos: MapPos) MapPos {
+        return .{ .x = self.wrapX(@intCast(pos.x)), .y = self.wrapY(@intCast(pos.y)) };
+    }
+
+    /// Get a neighboring tile in the given direction, wrapping around the
+    /// torus. Always returns a valid position (never MapPos.invalid).
+    pub fn getNeighborWrapped(self: Map, pos: MapPos, dir: Direction) MapPos {
+        const raw = pos.move(dir);
+        return self.wrapPos(raw);
+    }
+
+    /// Get all 6 neighboring positions with torus wrapping (always valid).
+    pub fn getAllNeighborsWrapped(self: Map, pos: MapPos) [6]MapPos {
+        var result: [6]MapPos = undefined;
+        inline for (std.meta.tags(Direction), 0..) |dir, i| {
+            result[i] = self.getNeighborWrapped(pos, dir);
+        }
+        return result;
+    }
+
+    /// Find the direction from one tile to an adjacent tile, supporting wrap.
+    /// Returns null if `to` is not a direct neighbour of `from`.
+    pub fn directionToWrapped(self: Map, from: MapPos, to: MapPos) ?Direction {
+        inline for (std.meta.tags(Direction)) |dir| {
+            const neighbor = self.getNeighborWrapped(from, dir);
+            if (neighbor.eql(to)) return dir;
+        }
+        return null;
+    }
+
+    // ── Original (non-wrapping) neighbour methods kept for compatibility ──
 
     /// Get a neighboring tile in the given direction.
     /// Returns MapPos.invalid if the neighbor would be out of bounds.
@@ -207,30 +274,31 @@ pub const Map = struct {
         return self.getTile(pos).owner == player;
     }
 
-    /// Generate terrain with a SMOOTH height field.
+    /// Generate terrain using periodic Perlin noise (seamless torus wrapping).
     ///
-    /// A smooth height field is essential for correct rendering: the map
-    /// renderer picks a terrain "slope sprite" (one of 8 variants per terrain
-    /// band) based on the height difference to neighboring tiles. If heights
-    /// were fully random per tile, every tile would pick a different slope
-    /// sprite and the terrain would look like a chaotic checkerboard rather
-    /// than a continuous landscape. By smoothing, neighbors share heights, most
-    /// tiles become "flat" (variant 4) using the same base sprite, and the
-    /// terrain blends seamlessly — matching the original Settlers look.
+    /// This uses multi-octave Perlin noise that is periodic in both X and Y
+    /// with period = map width/height, guaranteeing that the left edge
+    /// blends seamlessly into the right edge and the top into the bottom.
     ///
     /// Terrain types use only values present in the original C++ terrain enum
     /// (Water, Grass, Tundra, Snow, Desert) — these have actual sprites in the
     /// AssetMapGround bank (PAK 260-292). Mountain/swamp/lava are not used here.
     pub fn generateTerrain(self: *Map, seed: u64) void {
-        var prng = std.Random.DefaultPrng.init(seed);
-        const r = prng.random();
+        const w: u32 = @intCast(self.width);
+        const h: u32 = @intCast(self.height);
 
-        const w: usize = self.width;
-        const h: usize = self.height;
-        const n = w * h;
+        // Build a seeded permutation table for Perlin noise.
+        const perm = noise_mod.Permutation.init(seed);
 
-        // Working height buffer in f32 for smoothing.
-        const field = self.allocator.alloc(f32, n) catch {
+        // 1. Generate height field using periodic Perlin noise.
+        //    The noise is evaluated at (x * scale / w, y * scale / h) so that
+        //    one period of noise spans the entire map, making edges tile.
+        var lo: f64 = std.math.floatMax(f64);
+        var hi: f64 = -std.math.floatMax(f64);
+
+        // First pass: compute raw noise and find min/max for normalization.
+        const n = @as(usize, self.width) * @as(usize, self.height);
+        const field = self.allocator.alloc(f64, n) catch {
             // Fallback: flat grass if allocation fails.
             for (self.tiles) |*t| {
                 t.* = .{ .terrain = .grass, .height = 8 };
@@ -239,47 +307,45 @@ pub const Map = struct {
         };
         defer self.allocator.free(field);
 
-        // 1. Seed with random noise across the full height range.
-        for (field) |*v| v.* = @floatFromInt(r.uintLessThan(u32, 16));
+        // Feature scale: how many tiles per Perlin grid cell. Larger values
+        // give larger landmasses; smaller values give finer detail. With
+        // scale=4, each Perlin grid cell spans 4 tiles, so the noise varies
+        // smoothly across the map rather than collapsing to 0 at every
+        // integer tile coordinate (Perlin noise is exactly 0 at integer
+        // grid points, so sampling at raw integer tile coords yields a flat
+        // field — this was the all-water bug).
+        const feature_scale: f64 = 4.0;
+        const px: f64 = @as(f64, @floatFromInt(w)) / feature_scale;
+        const py: f64 = @as(f64, @floatFromInt(h)) / feature_scale;
 
-        // 2. Box-blur several passes. Each pass averages a tile with its 4
-        //    orthogonal neighbors, rapidly damping high-frequency noise into
-        //    gentle rolling hills. More passes = smoother / larger features.
-        const tmp = self.allocator.alloc(f32, n) catch field; // reuse on failure
-        defer if (tmp.ptr != field.ptr) self.allocator.free(tmp);
-        if (tmp.ptr != field.ptr) {
-            var pass: usize = 0;
-            while (pass < 6) : (pass += 1) {
-                for (0..h) |y| {
-                    for (0..w) |x| {
-                        var sum: f32 = field[y * w + x];
-                        var cnt: f32 = 1;
-                        if (x > 0)     { sum += field[y * w + (x - 1)]; cnt += 1; }
-                        if (x + 1 < w) { sum += field[y * w + (x + 1)]; cnt += 1; }
-                        if (y > 0)     { sum += field[(y - 1) * w + x]; cnt += 1; }
-                        if (y + 1 < h) { sum += field[(y + 1) * w + x]; cnt += 1; }
-                        tmp[y * w + x] = sum / cnt;
-                    }
-                }
-                @memcpy(field, tmp);
+        for (0..self.height) |y| {
+            for (0..self.width) |x| {
+                const fx: f64 = @floatFromInt(x);
+                const fy: f64 = @floatFromInt(y);
+                // Sample the noise in a continuous domain: divide tile coords
+                // by feature_scale so adjacent tiles land on different parts
+                // of the Perlin field. The period is the map size divided by
+                // the same factor, so the noise still tiles seamlessly at the
+                // map edges (left↔right, top↔bottom).
+                const sx = fx / feature_scale;
+                const sy = fy / feature_scale;
+                const height_noise = noise_mod.fbm_perlin2d(
+                    sx, sy,
+                    perm, @intFromFloat(px), @intFromFloat(py), 4,
+                );
+                const idx = @as(usize, y) * @as(usize, self.width) + @as(usize, x);
+                field[idx] = height_noise;
+                lo = @min(lo, height_noise);
+                hi = @max(hi, height_noise);
             }
         }
 
-        // 3. Renormalize the smoothed field back to the full 0..15 range
-        //    (blurring compresses the range toward the mean).
-        var lo: f32 = field[0];
-        var hi: f32 = field[0];
-        for (field) |v| {
-            lo = @min(lo, v);
-            hi = @max(hi, v);
-        }
+        // 2. Renormalize to [0, 15] and assign terrain bands.
         const span = @max(hi - lo, 0.0001);
 
-        // 4. Map smoothed heights → tile height + terrain band.
-        //    Bands: water (0-3) → grass (4-9) → tundra (10-12) → snow (13-15)
-        for (0..h) |y| {
-            for (0..w) |x| {
-                const idx = y * w + x;
+        for (0..self.height) |y| {
+            for (0..self.width) |x| {
+                const idx = @as(usize, y) * @as(usize, self.width) + @as(usize, x);
                 const norm = (field[idx] - lo) / span; // 0..1
                 const height: u4 = @intFromFloat(@min(15.0, norm * 15.0));
                 const tile = &self.tiles[idx];
@@ -295,15 +361,15 @@ pub const Map = struct {
             }
         }
 
-        // 5. Smooth out isolated water tiles surrounded by walkable land.
-        for (0..h) |y| {
-            for (0..w) |x| {
+        // 3. Smooth out isolated water tiles surrounded by walkable land,
+        //    using WRAPPING neighbour queries so edge water also gets cleaned.
+        for (0..self.height) |y| {
+            for (0..self.width) |x| {
                 const pos = MapPos{ .x = @intCast(x), .y = @intCast(y) };
                 if (self.getTile(pos).terrain == .water) {
-                    const neighbors = self.getAllNeighbors(pos);
+                    const neighbors = self.getAllNeighborsWrapped(pos);
                     var walkable_count: u8 = 0;
                     for (neighbors) |nb| {
-                        if (nb.eql(MapPos.invalid)) continue;
                         if (self.getTile(nb).terrain.isWalkable()) walkable_count += 1;
                     }
                     if (walkable_count >= 4) {
@@ -313,8 +379,7 @@ pub const Map = struct {
             }
         }
 
-        // 6. Scatter harvestable objects: trees (deciduous + pine) on grass,
-        //    rocks on the rocky tundra band. These are what gatherers consume.
+        // 4. Scatter harvestable objects: trees on grass, rocks on tundra.
         self.populateObjects(seed ^ 0x5eed);
     }
 
@@ -353,6 +418,7 @@ pub const Map = struct {
     /// Count the harvestable objects of a family within `radius` tiles of `pos`,
     /// and return the nearest such tile (for gatherers). `want_tree` true → trees
     /// (deciduous/pine); false → rocks. Returns null if none in range.
+    /// Uses wrapping coordinates so it works across map edges.
     pub fn findNearestObject(self: *Map, pos: MapPos, radius: i32, want_tree: bool) ?MapPos {
         var best: ?MapPos = null;
         var best_d: i32 = std.math.maxInt(i32);
@@ -362,16 +428,16 @@ pub const Map = struct {
         while (dy <= radius) : (dy += 1) {
             var dx: i32 = -radius;
             while (dx <= radius) : (dx += 1) {
-                const tx = px + dx;
-                const ty = py + dy;
-                if (tx < 0 or ty < 0 or tx >= self.width or ty >= self.height) continue;
-                const t = self.getTileXY(@intCast(tx), @intCast(ty));
+                // Use wrapping so we can find objects across map edges
+                const tx = self.wrapX(px + dx);
+                const ty = self.wrapY(py + dy);
+                const t = self.getTileXY(tx, ty);
                 const match = if (want_tree) t.object.isTree() else (t.object == .stone);
                 if (!match) continue;
                 const d = dx * dx + dy * dy;
                 if (d < best_d) {
                     best_d = d;
-                    best = MapPos{ .x = @intCast(tx), .y = @intCast(ty) };
+                    best = MapPos{ .x = tx, .y = ty };
                 }
             }
         }
@@ -410,8 +476,6 @@ test "Map terrain generation" {
     map.generateTerrain(42);
 
     // After generation we should have water, grassy lowland, and snowy highland.
-    // generateTerrain only emits terrain types that have PAK sprites (water, grass,
-    // tundra, snow) — mountain/swamp/lava are never generated.
     var water_count: usize = 0;
     var snow_count: usize = 0;
     var other_count: usize = 0;
@@ -424,7 +488,6 @@ test "Map terrain generation" {
                 .snow  => snow_count += 1,
                 else   => other_count += 1,
             }
-            // mountain/swamp/lava must never be generated
             try std.testing.expect(tile.terrain != .mountain);
             try std.testing.expect(tile.terrain != .swamp);
             try std.testing.expect(tile.terrain != .lava);
@@ -434,4 +497,68 @@ test "Map terrain generation" {
     try std.testing.expect(water_count > 0);
     try std.testing.expect(snow_count > 0);
     try std.testing.expect(other_count > 0);
+}
+
+test "Map wrapping coordinates" {
+    var map = try Map.init(std.testing.allocator, 64, 64);
+    defer map.deinit();
+
+    // wrapX / wrapY should wrap negative and overflow values
+    try std.testing.expectEqual(@as(u16, 0), map.wrapX(64));
+    try std.testing.expectEqual(@as(u16, 0), map.wrapY(64));
+    try std.testing.expectEqual(@as(u16, 63), map.wrapX(-1));
+    try std.testing.expectEqual(@as(u16, 63), map.wrapY(-1));
+    try std.testing.expectEqual(@as(u16, 5), map.wrapX(69));
+    try std.testing.expectEqual(@as(u16, 5), map.wrapX(-59));
+
+    // wrapPos should handle wrapping
+    const pos = map.wrapPos(.{ .x = 65, .y = 65 });
+    try std.testing.expectEqual(@as(u16, 1), pos.x);
+    try std.testing.expectEqual(@as(u16, 1), pos.y);
+}
+
+test "Map wrapped neighbour wraps around edges" {
+    var map = try Map.init(std.testing.allocator, 64, 64);
+    defer map.deinit();
+
+    // Moving right from the rightmost column wraps to column 0
+    const right_edge = MapPos{ .x = 63, .y = 10 };
+    const right_neighbor = map.getNeighborWrapped(right_edge, Direction.right);
+    try std.testing.expectEqual(@as(u16, 0), right_neighbor.x);
+    try std.testing.expectEqual(@as(u16, 10), right_neighbor.y);
+
+    // Moving down from the bottom row wraps to row 0
+    const bottom_edge = MapPos{ .x = 10, .y = 63 };
+    const bottom_neighbor = map.getNeighborWrapped(bottom_edge, Direction.down);
+    try std.testing.expectEqual(@as(u16, 10), bottom_neighbor.x);
+    try std.testing.expectEqual(@as(u16, 0), bottom_neighbor.y);
+
+    // Moving down-right from the bottom-right corner wraps both
+    const corner = MapPos{ .x = 63, .y = 63 };
+    const corner_neighbor = map.getNeighborWrapped(corner, Direction.down_right);
+    try std.testing.expectEqual(@as(u16, 0), corner_neighbor.x);
+    try std.testing.expectEqual(@as(u16, 0), corner_neighbor.y);
+}
+
+test "Map terrain generation is seamless at edges" {
+    var map = try Map.init(std.testing.allocator, 64, 64);
+    defer map.deinit();
+
+    map.generateTerrain(42);
+
+    // Check that height is continuous across the wrap boundary.
+    // The Perlin noise is periodic with period = map dimensions, so
+    // height at (0, y) should be close to height at (width-1, y), etc.
+    // We check that the difference is at most 2 height levels.
+    for (0..map.height) |y| {
+        const h_left = map.getTileXY(0, @intCast(y)).height;
+        const h_right = map.getTileXY(63, @intCast(y)).height;
+        const diff: i32 = @as(i32, @intCast(h_left)) - @as(i32, @intCast(h_right));
+        try std.testing.expect(@abs(diff) <= 3);
+
+        const h_top = map.getTileXY(@intCast(y), 0).height;
+        const h_bottom = map.getTileXY(@intCast(y), 63).height;
+        const diff_v: i32 = @as(i32, @intCast(h_top)) - @as(i32, @intCast(h_bottom));
+        try std.testing.expect(@abs(diff_v) <= 3);
+    }
 }

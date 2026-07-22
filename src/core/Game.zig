@@ -484,11 +484,11 @@ pub const Game = struct {
         if (!ftile.has_flag or !ttile.has_flag) return false;
 
         // Validate the path connects from→to and isn't blocked, before mutating.
+        // Uses wrapping so roads can wrap across map edges.
         var p = from;
         for (path, 0..) |d, i| {
             if (d >= Direction.count) return false;
-            p = p.move(@enumFromInt(d));
-            if (!map.isValidPos(p)) return false;
+            p = map.wrapPos(p.move(@enumFromInt(d)));
             if (i < path.len - 1 and map.getTile(p).has_building) return false;
         }
         if (!p.eql(to)) return false;
@@ -496,7 +496,7 @@ pub const Game = struct {
         // Mark intermediate tiles as road.
         p = from;
         for (path, 0..) |d, i| {
-            p = p.move(@enumFromInt(d));
+            p = map.wrapPos(p.move(@enumFromInt(d)));
             if (i < path.len - 1) map.getTile(p).has_road = true;
         }
 

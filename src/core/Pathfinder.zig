@@ -84,7 +84,7 @@ pub const Pathfinder = struct {
         return @intCast(@max(dx, dy));
     }
 
-    /// Cost of moving through a given tile.
+    /// Cost of moving through a given tile. Always valid on a torus map.
     fn terrainCost(self: Pathfinder, pos: MapPos) u32 {
         if (!self.map.isValidPos(pos)) return 1000;
         const tile = self.map.getTile(pos);
@@ -138,7 +138,7 @@ pub const Pathfinder = struct {
 
                 while (node_opt) |node| {
                     if (node.parent) |parent_idx| {
-                        if (self.map.directionTo(node.pos, prev_pos)) |dir| {
+                        if (self.map.directionToWrapped(node.pos, prev_pos)) |dir| {
                             steps_buf[step_count] = .{ .pos = node.pos, .dir = dir };
                             step_count += 1;
                         }
@@ -164,9 +164,9 @@ pub const Pathfinder = struct {
             closed_entry.value_ptr.* = {};
 
             // Explore neighbors
-            const neighbors = self.map.getAllNeighbors(current.pos);
+            // Explore neighbours with torus wrapping
+            const neighbors = self.map.getAllNeighborsWrapped(current.pos);
             for (neighbors) |npos| {
-                if (npos.eql(MapPos.invalid)) continue;
                 if (self.closed_set.contains(npos)) continue;
 
                 // Check if already in open list
@@ -221,7 +221,7 @@ pub const Pathfinder = struct {
             
             if (self.heuristic(current, to) <= 1) {
                 // Check if actually adjacent
-                if (self.map.directionTo(current, to) != null or current.eql(to)) {
+                if (self.map.directionToWrapped(current, to) != null or current.eql(to)) {
                     return true;
                 }
             }
