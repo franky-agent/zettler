@@ -21,10 +21,12 @@ pub const GLYPH_H: u8 = 14;
 pub const GLYPHS_PER_ROW: u8 = 16;
 pub const FONT_TEXTURE_W: u16 = GLYPH_W * GLYPHS_PER_ROW; // 96
 pub const FONT_TEXTURE_H: u16 = GLYPH_H * 6; // 84 (6 rows of 16)
+/// Bytes per pixel in the fallback atlas (RGBA8).
+const FALLBACK_BPP: usize = 4;
 
 /// Pre-built fallback glyph bitmap (4x6 pixel font rendered as RGBA).
 /// Each glyph is GLYPH_W × GLYPH_H pixels.
-fn buildFallbackGlyphAtlas() [FONT_TEXTURE_W * FONT_TEXTURE_H]u8 {
+fn buildFallbackGlyphAtlas() [FONT_TEXTURE_W * FONT_TEXTURE_H * FALLBACK_BPP]u8 {
     // Build a simple 4×6 bitmap font for ASCII 0x20..0x7E.
     // Each glyph in the atlas is 6×14 (the original font size),
     // stored row-first: rows of 16 glyphs.
@@ -36,14 +38,15 @@ fn buildFallbackGlyphAtlas() [FONT_TEXTURE_W * FONT_TEXTURE_H]u8 {
     // then scaled up to GLYPH_W × GLYPH_H in the atlas (the extra columns/rows
     // provide padding between glyphs in screen rendering).
     //
-    // For now, return an empty (all-white) atlas so text is at least visible
+    // For now, return an opaque-white atlas so text is at least visible
     // as white-on-transparent quads. Callers can supply their own font data.
-    const atlas: [FONT_TEXTURE_W * FONT_TEXTURE_H]u8 = @splat(255); // white
+    // RGBA8: every pixel = (255,255,255,255).
+    const atlas: [FONT_TEXTURE_W * FONT_TEXTURE_H * FALLBACK_BPP]u8 = @splat(255); // white opaque
     return atlas;
 }
 
 /// RGBA pixel data for the font texture (built at comptime).
-const FALLBACK_ATLAS: [FONT_TEXTURE_W * FONT_TEXTURE_H]u8 = buildFallbackGlyphAtlas();
+const FALLBACK_ATLAS: [FONT_TEXTURE_W * FONT_TEXTURE_H * FALLBACK_BPP]u8 = buildFallbackGlyphAtlas();
 
 /// Text alignment.
 pub const Align = enum(u2) {
