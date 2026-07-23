@@ -122,10 +122,16 @@ pub const SpriteBatcher = struct {
         const x1 = sprite.x + sprite.width; const y1 = sprite.y + sprite.height;
         const u = sprite.u; const v = sprite.v;
         const uu = sprite.u + sprite.uw; const vv = sprite.v + sprite.vh;
-        self.vertices[vi + 0] = .{ .x = x0, .y = y0, .u = u, .v = v, .r = sprite.r, .g = sprite.g, .b = sprite.b, .a = sprite.a };
-        self.vertices[vi + 1] = .{ .x = x1, .y = y0, .u = uu, .v = v, .r = sprite.r, .g = sprite.g, .b = sprite.b, .a = sprite.a };
-        self.vertices[vi + 2] = .{ .x = x1, .y = y1, .u = uu, .v = vv, .r = sprite.r, .g = sprite.g, .b = sprite.b, .a = sprite.a };
-        self.vertices[vi + 3] = .{ .x = x0, .y = y1, .u = u, .v = vv, .r = sprite.r, .g = sprite.g, .b = sprite.b, .a = sprite.a };
+        // Build the 4 vertices in a local array, then @memcpy into the slice.
+        // This lets the compiler emit wide vector stores (2x 64-byte YMM)
+        // instead of 4 separate 32-byte struct writes.
+        const quad = [4]SpriteVertex{
+            .{ .x = x0, .y = y0, .u = u,  .v = v,  .r = sprite.r, .g = sprite.g, .b = sprite.b, .a = sprite.a },
+            .{ .x = x1, .y = y0, .u = uu, .v = v,  .r = sprite.r, .g = sprite.g, .b = sprite.b, .a = sprite.a },
+            .{ .x = x1, .y = y1, .u = uu, .v = vv, .r = sprite.r, .g = sprite.g, .b = sprite.b, .a = sprite.a },
+            .{ .x = x0, .y = y1, .u = u,  .v = vv, .r = sprite.r, .g = sprite.g, .b = sprite.b, .a = sprite.a },
+        };
+        @memcpy(self.vertices[vi..][0..4], &quad);
         self.sprite_count += 1;
     }
 

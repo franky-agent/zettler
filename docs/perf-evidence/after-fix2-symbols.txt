@@ -1,0 +1,20 @@
+    17.66%     0.00%  freeserf     freeserf                       [.] _start
+    17.66%     0.00%  freeserf     libc.so.6                      [.] __libc_start_main_impl (inlined)
+    17.66%     0.00%  freeserf     libc.so.6                      [.] call_init (inlined)
+    17.66%     0.00%  freeserf     libc.so.6                      [.] __libc_start_call_main
+    17.66%     0.00%  freeserf     freeserf                       [.] main (inlined)
+    17.66%     0.00%  freeserf     freeserf                       [.] callMainWithArgs (inlined)
+    17.66%     0.00%  freeserf     freeserf                       [.] callMain (inlined)
+    17.66%     0.00%  freeserf     freeserf                       [.] wrapMain (inlined)
+    17.66%     0.00%  freeserf     freeserf                       [.] main.main
+    17.66%     0.00%  freeserf     freeserf                       [.] main.runGlfwDemo
+    17.66%     0.00%  freeserf     freeserf                       [.] app.App.run
+    16.20%     0.00%  freeserf     freeserf                       [.] gl.drawElements
+    16.19%     0.00%  freeserf     libgallium-26.0.3-1ubuntu1.so  [.] 0x00007270a459efd6
+    16.15%     0.00%  freeserf     libgallium-26.0.3-1ubuntu1.so  [.] 0x00007270a459daf3
+    16.13%     0.00%  freeserf     libgallium-26.0.3-1ubuntu1.so  [.] 0x00007270a4bab475
+    16.12%     0.00%  freeserf     libgallium-26.0.3-1ubuntu1.so  [.] 0x00007270a4a6a0ad
+    16.12%     0.00%  freeserf     libgallium-26.0.3-1ubuntu1.so  [.] 0x00007270a4a69bc1
+    16.12%     0.00%  freeserf     libgallium-26.0.3-1ubuntu1.so  [.] 0x00007270a4a697f4
+    15.95%     0.00%  freeserf     libgallium-26.0.3-1ubuntu1.so  [.] 0x00007270a4a71ae5
+    15.82%     0.00%  freeserf     freeserf                       [.] map_renderer.MapRenderer.render
