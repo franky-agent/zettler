@@ -59,8 +59,11 @@ pub const TileIter = struct {
                 const r = self.row;
                 self.col += 1;
                 if (self.map_w == 0 or self.map_h == 0) return null;
-                const w: i32 = @mod(c, self.map_w);
-                const h: i32 = @mod(r, self.map_h);
+                // Fast path: when col/row are already in [0, map_size), skip
+                // the @mod (avoids an integer division per axis per tile).
+                // This is the common case for partial views near map interior.
+                const w: i32 = if (c >= 0 and c < self.map_w) c else @mod(c, self.map_w);
+                const h: i32 = if (r >= 0 and r < self.map_h) r else @mod(r, self.map_h);
                 const lin: usize = @intCast(h * self.map_w + w);
                 if (self.visited_bits > 0 and lin < self.visited_bits) {
                     const byte_idx = lin >> 3;

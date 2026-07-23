@@ -282,16 +282,18 @@ pub const Map = struct {
     // ── Torus (wrapping) coordinate helpers ──────────────────────────
 
     /// Wrap an x coordinate into [0, width). Supports negative and overflow values.
-    /// Uses integer @mod which always returns non-negative results.
+    /// Fast path: when x is already in range, skips the @mod (avoids idiv).
     pub fn wrapX(self: Map, x: i32) u16 {
+        if (x >= 0 and x < @as(i32, @intCast(self.width))) return @intCast(x);
         const w: i32 = @intCast(self.width);
         const result: i32 = @mod(x, w);
         return @intCast(result);
     }
 
     /// Wrap a y coordinate into [0, height). Supports negative and overflow values.
-    /// Uses integer @mod which always returns non-negative results.
+    /// Fast path: when y is already in range, skips the @mod (avoids idiv).
     pub fn wrapY(self: Map, y: i32) u16 {
+        if (y >= 0 and y < @as(i32, @intCast(self.height))) return @intCast(y);
         const h: i32 = @intCast(self.height);
         const result: i32 = @mod(y, h);
         return @intCast(result);
