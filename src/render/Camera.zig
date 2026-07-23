@@ -68,6 +68,20 @@ pub const Camera = struct {
         return .{ .x = wx, .y = wy };
     }
 
+    /// Returns the world-space rectangle visible through this camera as
+    /// `(min_x, min_y, max_x, max_y)`. Used for viewport culling: only tiles
+    /// whose world position falls inside this rectangle can be on screen.
+    pub fn visibleWorldBounds(self: Camera) struct { min_x: f32, min_y: f32, max_x: f32, max_y: f32 } {
+        const half_w = self.viewport_w / (2.0 * self.zoom);
+        const half_h = self.viewport_h / (2.0 * self.zoom);
+        return .{
+            .min_x = self.x - half_w,
+            .min_y = self.y - half_h,
+            .max_x = self.x + half_w,
+            .max_y = self.y + half_h,
+        };
+    }
+
     /// Convert world coordinates to screen coordinates.
     pub fn worldToScreen(self: Camera, world_x: f32, world_y: f32) Vec2f {
         const sx = (world_x - self.x) * self.zoom + self.viewport_w / 2.0;

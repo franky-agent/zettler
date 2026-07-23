@@ -149,7 +149,7 @@ fn mkVert(x: f32, y: f32, gu: f32, gv: f32, eu: f32, ev: f32, euw: f32, evh: f32
 /// from its centroid by `expand` (so it bleeds into neighbours) and tagged with
 /// barycentric coords A=(1,0) B=(0,1) C=(0,0) for the shader's edge-fade dither.
 /// Ground UV is screen-space so the overlay tiles like the base.
-fn emitTri(verts: []MapRenderer.Vertex, idx: []u16, base: u16,
+fn emitTri(verts: []MapRenderer.Vertex, idx: []u32, base: u32,
     ax: f32, ay: f32, bx: f32, by: f32, cx: f32, cy: f32, expand: f32,
     eu: f32, ev: f32, euw: f32, evh: f32,
     c0: [3]f32, c1: [3]f32, c2: [3]f32, a: f32) void {
@@ -269,11 +269,11 @@ pub const MapRenderer = struct {
         // the base (neighbour) behind → a clean procedural stippled transition.
         const base_v = try allocator.alloc(Vertex, num_tiles * 4);
         defer allocator.free(base_v);
-        const base_i = try allocator.alloc(u16, num_tiles * 6);
+        const base_i = try allocator.alloc(u32, num_tiles * 6);
         defer allocator.free(base_i);
         const ov_v = try allocator.alloc(Vertex, num_tiles * 6);
         defer allocator.free(ov_v);
-        const ov_i = try allocator.alloc(u16, num_tiles * 6);
+        const ov_i = try allocator.alloc(u32, num_tiles * 6);
         defer allocator.free(ov_i);
         var ov_vc: usize = 0; // overlay vertex count
         var ov_ic: usize = 0; // overlay index count
@@ -380,9 +380,12 @@ pub const MapRenderer = struct {
 
     /// Render the terrain with torus wrapping.
     ///
-    /// Draws the map at 9 offsets (a 3×3 grid around the camera) so that
-    /// wherever the camera is, the visible area is fully covered with
-    /// seamless wrapping tiles. The GPU clips offscreen geometry.
+    /// The map is drawn at up to 9 offsets (a 3×3 grid around the camera) so
+    /// that wherever the camera is, the visible area is fully covered with
+    /// seamless wrapping tiles. As an optimization, only offsets whose
+    /// world-space rectangle `[dx, dx+mw) × [dy, dy+mh)` intersect the camera's
+    /// visible bounds are submitted — typically 1–4 instead of all 9, which
+    /// avoids the GPU processing millions of offscreen vertices on large maps.
     pub fn render(self: *MapRenderer, camera: *Camera) void {
         if (!self.initialized) return;
 
@@ -393,11 +396,29 @@ pub const MapRenderer = struct {
         // 3×3 grid of offsets ensures seamless wrapping in all directions.
         // When the camera is near the left/top edge, we need negative offsets
         // to cover the viewport extending past the wrap seam.
-        const offsets = [9][2]f32{
+        const all_offsets = [9][2]f32{
             .{ -mw, -mh }, .{ 0.0, -mh }, .{ mw, -mh },
             .{ -mw, 0.0 }, .{ 0.0, 0.0 }, .{ mw, 0.0 },
             .{ -mw, mh },  .{ 0.0, mh },  .{ mw, mh },
         };
+
+        // Cull offsets that do not intersect the camera's visible world bounds.
+        // Each offset copy covers [dx, dx+mw) × [dy, dy+mh) in world space.
+        const vb = camera.visibleWorldBounds();
+        var offsets: [9][2]f32 = undefined;
+        var num_offsets: usize = 0;
+        for (all_offsets) |off| {
+            const ox = off[0];
+            const oy = off[1];
+            // Rectangle [ox, ox+mw) × [oy, oy+mh) vs [vb.min_x, vb.max_x) × [vb.min_y, vb.max_y).
+            const overlaps = ox < vb.max_x and (ox + mw) > vb.min_x and
+                oy < vb.max_y and (oy + mh) > vb.min_y;
+            if (overlaps) {
+                offsets[num_offsets] = off;
+                num_offsets += 1;
+            }
+        }
+        const draw_offsets = offsets[0..num_offsets];
 
         camera.updateMatrices();
 
@@ -417,20 +438,20 @@ pub const MapRenderer = struct {
         gl.bindBuffer(gl.GL_ARRAY_BUFFER, self.vbo);
         bindTerrainAttribs(stride);
         gl.bindBuffer(gl.GL_ELEMENT_ARRAY_BUFFER, self.ibo);
-        for (offsets) |off| {
+        for (draw_offsets) |off| {
             self.shader.setOffset(off[0], off[1]);
-            gl.drawElements(gl.GL_TRIANGLES, @intCast(self.index_count), gl.GL_UNSIGNED_SHORT, 0);
+            gl.drawElements(gl.GL_TRIANGLES, @intCast(self.index_count), gl.GL_UNSIGNED_INT, 0);
         }
 
-        // Pass 2: Overlay (boundary tiles only) at all 9 offsets.
+        // Pass 2: Overlay (boundary tiles only) at the visible offsets.
         if (self.overlay_index_count > 0) {
             self.shader.setUseMask(1);
             gl.bindBuffer(gl.GL_ARRAY_BUFFER, self.overlay_vbo);
             bindTerrainAttribs(stride);
             gl.bindBuffer(gl.GL_ELEMENT_ARRAY_BUFFER, self.overlay_ibo);
-            for (offsets) |off| {
+            for (draw_offsets) |off| {
                 self.shader.setOffset(off[0], off[1]);
-                gl.drawElements(gl.GL_TRIANGLES, @intCast(self.overlay_index_count), gl.GL_UNSIGNED_SHORT, 0);
+                gl.drawElements(gl.GL_TRIANGLES, @intCast(self.overlay_index_count), gl.GL_UNSIGNED_INT, 0);
             }
         }
 

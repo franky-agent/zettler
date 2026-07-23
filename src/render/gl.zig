@@ -34,6 +34,7 @@ pub const GL_LINES: GLenum = 0x0001;
 pub const GL_LINE_STRIP: GLenum = 0x0003;
 pub const GL_UNSIGNED_BYTE: GLenum = 0x1401;
 pub const GL_UNSIGNED_SHORT: GLenum = 0x1403;
+pub const GL_UNSIGNED_INT: GLenum = 0x1405;
 pub const GL_FLOAT: GLenum = 0x1406;
 pub const GL_DEPTH_TEST: GLenum = 0x0B71;
 pub const GL_BLEND: GLenum = 0x0BE2;

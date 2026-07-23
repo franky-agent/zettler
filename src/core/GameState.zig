@@ -43,7 +43,7 @@ pub const GameState = struct {
     pub fn init(allocator: std.mem.Allocator, map_w: u16, map_h: u16) !GameState {
         return .{
             .allocator = allocator,
-            .map = try Map.init(allocator, map_w, map_h),
+            .map = try Map.initChecked(allocator, map_w, map_h),
             .players = .{},
             .buildings = BuildingStates.init(allocator),
             .flags = FlagStates.init(allocator),

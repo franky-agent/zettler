@@ -10,6 +10,7 @@ pub const Camera = @import("Camera.zig").Camera;
 pub const map_renderer = @import("map_renderer.zig");
 pub const sprite_batcher = @import("sprite_batcher.zig");
 pub const texture_atlas = @import("texture_atlas.zig");
+pub const culling = @import("culling.zig");
 
 pub const MapRenderer = map_renderer.MapRenderer;
 pub const SpriteBatcher = sprite_batcher.SpriteBatcher;

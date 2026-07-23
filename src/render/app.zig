@@ -13,6 +13,7 @@ const camera_mod = @import("Camera.zig");
 const map_renderer_mod = @import("map_renderer.zig");
 const sprite_batcher_mod = @import("sprite_batcher.zig");
 const texture_atlas_mod = @import("texture_atlas.zig");
+const culling_mod = @import("culling.zig");
 const font_mod = @import("Font.zig");
 const panel_mod = @import("ui/Panel.zig");
 const minimap_mod = @import("ui/Minimap.zig");
@@ -196,9 +197,12 @@ pub const App = struct {
     /// clicks land on the wrong icon.
     view_w: f32 = @floatFromInt(WINDOW_WIDTH),
     view_h: f32 = @floatFromInt(WINDOW_HEIGHT),
+    /// Scratch bitmap for viewport-culling dedup (sized to map tile count / 8).
+    /// Allocated once in initGL; cleared each frame by `visibleTiles`.
+    cull_visited: []u8 = &.{},
 
-    pub fn init(allocator: std.mem.Allocator, opts: AppOptions) !App {
-        var game_state = try Game.init(allocator, 64, 64, 1, .{
+    pub fn init(allocator: std.mem.Allocator, map_w: u16, map_h: u16, opts: AppOptions) !App {
+        var game_state = try Game.init(allocator, map_w, map_h, 1, .{
             .seed = opts.seed,
             .map_file = opts.map_file,
         });
@@ -215,7 +219,18 @@ pub const App = struct {
 
         var camera = Camera{};
         camera.setViewportSize(WINDOW_WIDTH, WINDOW_HEIGHT);
-        camera.centerOn(32.0 * 32.0, 32.0 * 10.0); // map center: TileWidth=32
+        // Center on the middle of the actual map. The isometric projection is
+        //   screen_x = col * TileWidth - row * (TileWidth/2)
+        //   screen_y = row * TileHeight
+        // so the map center in screen space is:
+        //   cx = (map_w/2) * TileWidth - (map_h/2) * (TileWidth/2)
+        //   cy = (map_h/2) * TileHeight
+        const half_w: f32 = @as(f32, @floatFromInt(map_w)) * 0.5;
+        const half_h: f32 = @as(f32, @floatFromInt(map_h)) * 0.5;
+        camera.centerOn(
+            half_w * map_renderer_mod.TileWidth - half_h * (map_renderer_mod.TileWidth * 0.5),
+            half_h * map_renderer_mod.TileHeight,
+        );
         camera.zoom = 2.0;
 
         return .{
@@ -240,6 +255,7 @@ pub const App = struct {
         self.sprite_batcher.deinit();
         self.map_renderer.deinit();
         self.shader.deinit();
+        if (self.cull_visited.len > 0) self.allocator.free(self.cull_visited);
         self.game.deinit();
     }
 
@@ -479,6 +495,13 @@ pub const App = struct {
         try self.sprite_batcher.initGL();
         try self.map_renderer.init(&self.game.state.map);
 
+        // Allocate the viewport-culling visited bitmap (1 bit per tile).
+        const tile_count = self.game.state.map.tileCount();
+        const bmp_bytes = (tile_count + 7) / 8;
+        if (bmp_bytes > 0) {
+            self.cull_visited = self.allocator.alloc(u8, bmp_bytes) catch &.{};
+        }
+
         self.initialized = true;
     }
 
@@ -517,27 +540,15 @@ pub const App = struct {
             if (self.atlas_loaded and self.atlas.uploaded) {
                 self.atlas.setFilter(false); // nearest
             }
-            // Render objects (waves, roads, scene) at each torus offset so they
-            // wrap seamlessly along with the terrain.
-            const mw = @as(f32, @floatFromInt(self.game.state.map.width)) * map_renderer_mod.TileWidth;
-            const mh = @as(f32, @floatFromInt(self.game.state.map.height)) * map_renderer_mod.TileHeight;
-            const offsets = [9][2]f32{
-                .{ -mw, -mh }, .{ 0.0, -mh }, .{ mw, -mh },
-                .{ -mw, 0.0 }, .{ 0.0, 0.0 }, .{ mw, 0.0 },
-                .{ -mw, mh },  .{ 0.0, mh },  .{ mw, mh },
-            };
-            const saved_cx = self.camera.x;
-            const saved_cy = self.camera.y;
-            for (offsets) |off| {
-                self.camera.x = saved_cx + off[0];
-                self.camera.y = saved_cy + off[1];
-                self.camera.matrices_dirty = true;
-                self.renderWaves(const_tick);
-                self.renderRoads();
-                self.renderScene();
-            }
-            self.camera.x = saved_cx;
-            self.camera.y = saved_cy;
+            // Render objects (waves, roads, buildings, map objects) in a single
+            // culled pass. The tile iterator handles torus wrapping, so no 3×3
+            // offset loop is needed on the CPU side (the terrain renderer keeps
+            // its 9-offset GPU draw since the VBO is static and GPU clipping is
+            // cheap).
+            self.renderWaves(const_tick);
+            self.renderRoads();
+            self.renderMapObjects();
+            self.renderBuildings();
             self.camera.matrices_dirty = true;
 
             // Render UI overlay (HUD + minimap + building ghost)
@@ -575,21 +586,101 @@ pub const App = struct {
         self.camera.wrap(mw, mh);
     }
 
-    /// One drawable in the world scene: either a building (by index) or a
-    /// standing map object on a tile (by x,y). `baseline` is the screen-space y
-    /// used to sort back-to-front.
+    /// One drawable standing object (tree/rock) on a tile. `baseline` is the
+    /// screen-space y used to sort back-to-front so nearer sprites and their
+    /// shadows correctly occlude farther ones.
     const SceneItem = struct {
         baseline: f32,
-        is_building: bool,
-        bidx: u32 = 0,
         x: u16 = 0,
         y: u16 = 0,
     };
 
-    /// Render the world scene: buildings and standing map objects (trees/rocks),
-    /// interleaved and sorted back-to-front by screen baseline so nearer sprites
-    /// and their shadows correctly occlude farther ones.
-    fn renderScene(self: *App) void {
+    /// Render all standing map objects (trees/rocks), sorted back-to-front by
+    /// screen baseline. Drawn in its OWN batch flush so a large number of trees
+    /// can never fill the batcher and crowd out the buildings (which are drawn
+    /// in a separate pass by `renderBuildings`).
+    /// Configure the sprite batcher to auto-flush (draw + reset) when its
+    /// buffer fills up, instead of silently dropping sprites. `tex` is the
+    /// texture that will be used for the flush (atlas or white fallback).
+    fn setupAutoFlush(self: *App, batcher: *SpriteBatcher, tex: *Texture) void {
+        batcher.setAutoFlush(&self.shader, tex, &self.camera);
+    }
+
+    fn renderMapObjects(self: *App) void {
+        const batcher = &self.sprite_batcher;
+        const cam = &self.camera;
+        const tw: f32 = map_renderer_mod.TileWidth;
+        const th: f32 = map_renderer_mod.TileHeight;
+        const hw: f32 = tw / 2.0;
+        const map = &self.game.state.map;
+
+        // Set up the texture used for both the final render and auto-flush.
+        var atlas_tex = Texture{ .id = self.atlas.gl_texture, .width = texture_atlas_mod.ATLAS_SIZE, .height = texture_atlas_mod.ATLAS_SIZE };
+        var white_tex = Texture{ .id = fallback_tex, .width = 1, .height = 1 };
+        const tex: *Texture = if (self.atlas_loaded and self.atlas.uploaded) &atlas_tex else &white_tex;
+        self.setupAutoFlush(batcher, tex);
+        batcher.begin();
+
+        // Viewport culling: only iterate tiles that are visible through the
+        // camera, instead of the entire map. The iterator handles torus
+        // wrapping, so a single pass covers the visible area (no 3×3 loop).
+        const b = cam.visibleWorldBounds();
+        const num_visible = culling_mod.visibleTiles(
+            b.min_x, b.min_y, b.max_x, b.max_y, map.*, self.cull_visited,
+        );
+        // Upper bound on visible tiles for the sort buffer.
+        const max_visible = num_visible.row_hi - num_visible.row_lo + 1 +
+            num_visible.col_hi - num_visible.col_lo + 1;
+        _ = max_visible;
+
+        // Collect visible tiles that have a standing object, then sort.
+        // Use a stack buffer for typical zoomed views; fall back to a heap
+        // allocation when zoomed out far enough that the visible tile count
+        // exceeds the stack capacity.
+        var stack_buf: [4096]SceneItem = undefined;
+        const visible_tile_count: usize = blk: {
+            const rs = @as(usize, @intCast(num_visible.row_hi - num_visible.row_lo + 1));
+            const cs = @as(usize, @intCast(num_visible.col_hi - num_visible.col_lo + 1));
+            break :blk rs * cs;
+        };
+        var list: []SceneItem = stack_buf[0..];
+        var heap_list: ?[]SceneItem = null;
+        if (visible_tile_count > stack_buf.len) {
+            heap_list = std.heap.page_allocator.alloc(SceneItem, visible_tile_count) catch null;
+            if (heap_list) |hl| list = hl;
+        }
+        defer if (heap_list) |hl| std.heap.page_allocator.free(hl);
+
+        var n: usize = 0;
+        var it = num_visible;
+        while (it.next()) |pos| {
+            if (n >= list.len) break;
+            const t = map.getTile(pos);
+            if (t.object == .none) continue;
+            const oh: f32 = @floatFromInt(t.height);
+            list[n] = .{
+                .baseline = @as(f32, @floatFromInt(pos.y)) * th - map_renderer_mod.HEIGHT_SCALE * oh,
+                .x = pos.x,
+                .y = pos.y,
+            };
+            n += 1;
+        }
+        std.mem.sort(SceneItem, list[0..n], {}, struct {
+            fn lt(_: void, p: SceneItem, q: SceneItem) bool {
+                return p.baseline < q.baseline;
+            }
+        }.lt);
+        for (list[0..n]) |e| {
+            self.drawMapObject(batcher, e.x, e.y, tw, th, hw);
+        }
+
+        batcher.render(&self.shader, tex, cam);
+    }
+
+    /// Render all buildings, sorted back-to-front by screen baseline. Drawn in
+    /// its OWN batch flush (separate from `renderMapObjects`) so trees can never
+    /// fill the batcher and cause buildings to be silently dropped.
+    fn renderBuildings(self: *App) void {
         const batcher = &self.sprite_batcher;
         const cam = &self.camera;
         const tw: f32 = map_renderer_mod.TileWidth;
@@ -598,61 +689,55 @@ pub const App = struct {
         const map = &self.game.state.map;
         const items = self.game.state.buildings.buildings.items;
 
+        // Set up the texture used for both the final render and auto-flush.
+        var atlas_tex = Texture{ .id = self.atlas.gl_texture, .width = texture_atlas_mod.ATLAS_SIZE, .height = texture_atlas_mod.ATLAS_SIZE };
+        var white_tex = Texture{ .id = fallback_tex, .width = 1, .height = 1 };
+        const tex: *Texture = if (self.atlas_loaded and self.atlas.uploaded) &atlas_tex else &white_tex;
+        self.setupAutoFlush(batcher, tex);
         batcher.begin();
 
-        const a = std.heap.page_allocator;
-        const list = a.alloc(SceneItem, items.len + map.tileCount()) catch null;
-        defer if (list) |l| a.free(l);
+        // Viewport culling: skip buildings whose tile is outside the visible
+        // world bounds. Buildings are few, so we just filter — no tile
+        // iterator needed. Use a stack buffer for up to 1024 buildings;
+        // fall back to heap for pathological counts.
+        var stack_buf: [1024]struct { baseline: f32, bidx: u32 } = undefined;
+        const EntryType = @TypeOf(stack_buf[0]);
+        var list: []EntryType = stack_buf[0..];
+        var heap_list: ?[]EntryType = null;
+        if (items.len > stack_buf.len) {
+            heap_list = std.heap.page_allocator.alloc(EntryType, items.len) catch null;
+            if (heap_list) |hl| list = hl;
+        }
+        defer if (heap_list) |hl| std.heap.page_allocator.free(hl);
 
-        if (list) |l| {
-            var n: usize = 0;
-            for (items, 0..) |*b, i| {
-                const bh: f32 = @floatFromInt(map.getTile(b.pos).height);
-                l[n] = .{
-                    .baseline = @as(f32, @floatFromInt(b.pos.y)) * th - map_renderer_mod.HEIGHT_SCALE * bh,
-                    .is_building = true,
-                    .bidx = @intCast(i),
-                };
-                n += 1;
+        const b = cam.visibleWorldBounds();
+        var n: usize = 0;
+        for (items, 0..) |*bld, i| {
+            if (n >= list.len) break;
+            // Cull buildings outside the visible world bounds (with a margin
+            // for the sprite footprint which extends above the tile).
+            const wx = @as(f32, @floatFromInt(bld.pos.x)) * tw - @as(f32, @floatFromInt(bld.pos.y)) * hw;
+            const wy = @as(f32, @floatFromInt(bld.pos.y)) * th;
+            const margin: f32 = tw * 4.0; // generous for tall building sprites
+            if (wx + margin < b.min_x or wx - margin > b.max_x or
+                wy + margin < b.min_y or wy - margin > b.max_y) continue;
+            const bh: f32 = @floatFromInt(map.getTile(bld.pos).height);
+            list[n] = .{
+                .baseline = @as(f32, @floatFromInt(bld.pos.y)) * th - map_renderer_mod.HEIGHT_SCALE * bh,
+                .bidx = @intCast(i),
+            };
+            n += 1;
+        }
+        std.mem.sort(EntryType, list[0..n], {}, struct {
+            fn lt(_: void, p: EntryType, q: EntryType) bool {
+                return p.baseline < q.baseline;
             }
-            for (0..map.height) |yy| {
-                for (0..map.width) |xx| {
-                    const t = map.getTileXY(@intCast(xx), @intCast(yy));
-                    if (t.object == .none) continue;
-                    const oh: f32 = @floatFromInt(t.height);
-                    l[n] = .{
-                        .baseline = @as(f32, @floatFromInt(yy)) * th - map_renderer_mod.HEIGHT_SCALE * oh,
-                        .is_building = false,
-                        .x = @intCast(xx),
-                        .y = @intCast(yy),
-                    };
-                    n += 1;
-                }
-            }
-            std.mem.sort(SceneItem, l[0..n], {}, struct {
-                fn lt(_: void, p: SceneItem, q: SceneItem) bool {
-                    return p.baseline < q.baseline;
-                }
-            }.lt);
-            for (l[0..n]) |e| {
-                if (e.is_building) {
-                    self.drawBuilding(batcher, &items[e.bidx], tw, th, hw);
-                } else {
-                    self.drawMapObject(batcher, e.x, e.y, tw, th, hw);
-                }
-            }
-        } else {
-            // Allocation failed: draw buildings unsorted (still correct).
-            for (items) |*b| self.drawBuilding(batcher, b, tw, th, hw);
+        }.lt);
+        for (list[0..n]) |e| {
+            self.drawBuilding(batcher, &items[e.bidx], tw, th, hw);
         }
 
-        if (self.atlas_loaded and self.atlas.uploaded) {
-            var atlas_tex = Texture{ .id = self.atlas.gl_texture, .width = texture_atlas_mod.ATLAS_SIZE, .height = texture_atlas_mod.ATLAS_SIZE };
-            batcher.render(&self.shader, &atlas_tex, cam);
-        } else {
-            var white_tex = Texture{ .id = fallback_tex, .width = 1, .height = 1 };
-            batcher.render(&self.shader, &white_tex, cam);
-        }
+        batcher.render(&self.shader, tex, cam);
     }
 
     /// Draw one standing map object (tree/rock) with its shadow.
@@ -714,21 +799,20 @@ pub const App = struct {
 
         // Road segments: for each road/flag tile, connect to forward neighbours
         // that are also road/flag (forward dirs only, to avoid drawing twice).
-        // Uses WRAPPING so roads draw correctly across map edges.
+        // Uses viewport culling + wrapping so roads draw correctly across edges.
         const fwd = [_]core.Direction{ .right, .down_right, .down };
-        for (0..map.height) |yy| {
-            for (0..map.width) |xx| {
-                const pos = core.MapPos{ .x = @intCast(xx), .y = @intCast(yy) };
-                const t = map.getTile(pos);
-                if (!(t.has_road or t.has_flag)) continue;
-                const c0 = self.tileCenter(pos);
-                for (fwd) |d| {
-                    const np = map.getNeighborWrapped(pos, d);
-                    const nt = map.getTile(np);
-                    if (!(nt.has_road or nt.has_flag)) continue;
-                    const c1 = self.tileCenter(np);
-                    addLine(batcher, c0[0], c0[1], c1[0], c1[1], 4.0, .{ 0.55, 0.4, 0.22, 1.0 });
-                }
+        const b = self.camera.visibleWorldBounds();
+        var it = culling_mod.visibleTiles(b.min_x, b.min_y, b.max_x, b.max_y, map.*, self.cull_visited);
+        while (it.next()) |pos| {
+            const t = map.getTile(pos);
+            if (!(t.has_road or t.has_flag)) continue;
+            const c0 = self.tileCenter(pos);
+            for (fwd) |d| {
+                const np = map.getNeighborWrapped(pos, d);
+                const nt = map.getTile(np);
+                if (!(nt.has_road or nt.has_flag)) continue;
+                const c1 = self.tileCenter(np);
+                addLine(batcher, c0[0], c0[1], c1[0], c1[1], 4.0, .{ 0.55, 0.4, 0.22, 1.0 });
             }
         }
 
@@ -855,32 +939,34 @@ pub const App = struct {
 
         batcher.begin();
         var drew = false;
-        for (0..map.height) |yy| {
-            for (0..map.width) |xx| {
-                const tile = map.getTileXY(@intCast(xx), @intCast(yy));
-                if (tile.terrain != .water) continue;
-                // Skip shoreline tiles to avoid waves spilling onto land.
-                // Uses wrapping so edge water checks neighbours across the seam.
-                const xxi: i32 = @intCast(xx);
-                const yyi: i32 = @intCast(yy);
-                if (!isWater(map, xxi + 1, yyi) or !isWater(map, xxi, yyi + 1) or
-                    !isWater(map, xxi + 1, yyi + 1)) continue;
-                const pos: u64 = @as(u64, yy) * map.width + xx;
-                const frame: u16 = @intCast(((pos ^ 5) + (tick >> 3)) & 0xf);
-                const entry = self.atlas.get(630 + frame) orelse continue;
-                const wx = @as(f32, @floatFromInt(xx)) * tw - @as(f32, @floatFromInt(yy)) * hw;
-                const wy = @as(f32, @floatFromInt(yy)) * th -
-                    map_renderer_mod.HEIGHT_SCALE * @as(f32, @floatFromInt(tile.height));
-                batcher.add(.{
-                    .x = wx - hw,
-                    .y = wy,
-                    .width = @floatFromInt(entry.pixel_w),
-                    .height = @floatFromInt(entry.pixel_h),
-                    .u = entry.u, .v = entry.v, .uw = entry.uw, .vh = entry.vh,
-                    .r = 1, .g = 1, .b = 1, .a = 1,
-                });
-                drew = true;
-            }
+        const b = cam.visibleWorldBounds();
+        var it = culling_mod.visibleTiles(b.min_x, b.min_y, b.max_x, b.max_y, map.*, self.cull_visited);
+        while (it.next()) |tile_pos| {
+            const xx: u16 = tile_pos.x;
+            const yy: u16 = tile_pos.y;
+            const tile = map.getTileXY(xx, yy);
+            if (tile.terrain != .water) continue;
+            // Skip shoreline tiles to avoid waves spilling onto land.
+            // Uses wrapping so edge water checks neighbours across the seam.
+            const xxi: i32 = @intCast(xx);
+            const yyi: i32 = @intCast(yy);
+            if (!isWater(map, xxi + 1, yyi) or !isWater(map, xxi, yyi + 1) or
+                !isWater(map, xxi + 1, yyi + 1)) continue;
+            const lin: u64 = @as(u64, yy) * map.width + xx;
+            const frame: u16 = @intCast(((lin ^ 5) + (tick >> 3)) & 0xf);
+            const entry = self.atlas.get(630 + frame) orelse continue;
+            const wx = @as(f32, @floatFromInt(xx)) * tw - @as(f32, @floatFromInt(yy)) * hw;
+            const wy = @as(f32, @floatFromInt(yy)) * th -
+                map_renderer_mod.HEIGHT_SCALE * @as(f32, @floatFromInt(tile.height));
+            batcher.add(.{
+                .x = wx - hw,
+                .y = wy,
+                .width = @floatFromInt(entry.pixel_w),
+                .height = @floatFromInt(entry.pixel_h),
+                .u = entry.u, .v = entry.v, .uw = entry.uw, .vh = entry.vh,
+                .r = 1, .g = 1, .b = 1, .a = 1,
+            });
+            drew = true;
         }
         if (!drew) return;
         var atlas_tex = Texture{ .id = self.atlas.gl_texture, .width = texture_atlas_mod.ATLAS_SIZE, .height = texture_atlas_mod.ATLAS_SIZE };
@@ -1006,7 +1092,7 @@ pub const App = struct {
         gl.vertexAttribPointer(1, 2, gl.GL_FLOAT, gl.GL_FALSE, stride, 8);
         gl.enableVertexAttribArray(2);
         gl.vertexAttribPointer(2, 4, gl.GL_FLOAT, gl.GL_FALSE, stride, 16);
-        gl.drawElements(gl.GL_TRIANGLES, @intCast(batcher.sprite_count * 6), gl.GL_UNSIGNED_SHORT, 0);
+        gl.drawElements(gl.GL_TRIANGLES, @intCast(batcher.sprite_count * 6), gl.GL_UNSIGNED_INT, 0);
         gl.disableVertexAttribArray(0);
         gl.disableVertexAttribArray(1);
         gl.disableVertexAttribArray(2);

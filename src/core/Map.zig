@@ -102,6 +102,14 @@ pub const TerrainGen = struct {
 };
 
 /// The game map — a dense hex grid that wraps toroidally.
+///
+/// Map dimensions are configurable at startup. The minimum playable size is
+/// `MIN_SIZE`×`MIN_SIZE` (the classic 64×64 Settlers map) and the maximum is
+/// `MAX_SIZE`×`MAX_SIZE` (1024×1024, over 1 million tiles). Sizes outside
+/// this range are rejected by `initChecked` with `error.MapSizeOutOfRange`.
+pub const MIN_SIZE: u16 = 64;
+pub const MAX_SIZE: u16 = 1024;
+
 pub const Map = struct {
     width: u16 = 0,
     height: u16 = 0,
@@ -109,6 +117,13 @@ pub const Map = struct {
 
     allocator: std.mem.Allocator = std.heap.page_allocator,
 
+    /// Validate that a map dimension is within the supported range.
+    pub fn isValidSize(w: u16, h: u16) bool {
+        return w >= MIN_SIZE and h >= MIN_SIZE and w <= MAX_SIZE and h <= MAX_SIZE;
+    }
+
+    /// Create a map without size validation. Use `initChecked` from
+    /// application code to enforce the min/max bounds.
     pub fn init(allocator: std.mem.Allocator, w: u16, h: u16) !Map {
         const tile_count = @as(usize, w) * @as(usize, h);
         const tiles = try allocator.alloc(Tile, tile_count);
@@ -119,6 +134,12 @@ pub const Map = struct {
             .tiles = tiles,
             .allocator = allocator,
         };
+    }
+
+    /// Create a map, rejecting sizes outside [MIN_SIZE, MAX_SIZE].
+    pub fn initChecked(allocator: std.mem.Allocator, w: u16, h: u16) !Map {
+        if (!isValidSize(w, h)) return error.MapSizeOutOfRange;
+        return Map.init(allocator, w, h);
     }
 
     pub fn deinit(self: *Map) void {
@@ -757,4 +778,43 @@ test "Map terrain generation is seamless at edges" {
         const diff_v: i32 = @as(i32, @intCast(h_top)) - @as(i32, @intCast(h_bottom));
         try std.testing.expect(@abs(diff_v) <= 3);
     }
+}
+
+test "Map size validation accepts the supported range" {
+    try std.testing.expect(Map.isValidSize(64, 64));
+    try std.testing.expect(Map.isValidSize(128, 128));
+    try std.testing.expect(Map.isValidSize(256, 512));
+    try std.testing.expect(Map.isValidSize(1024, 1024));
+
+    try std.testing.expect(!Map.isValidSize(63, 64));
+    try std.testing.expect(!Map.isValidSize(64, 63));
+    try std.testing.expect(!Map.isValidSize(1025, 64));
+    try std.testing.expect(!Map.isValidSize(64, 1025));
+}
+
+test "Map initChecked rejects out-of-range sizes" {
+    try std.testing.expectError(error.MapSizeOutOfRange, Map.initChecked(std.testing.allocator, 32, 32));
+    try std.testing.expectError(error.MapSizeOutOfRange, Map.initChecked(std.testing.allocator, 2048, 64));
+
+    var map = try Map.initChecked(std.testing.allocator, 128, 128);
+    defer map.deinit();
+    try std.testing.expectEqual(@as(u16, 128), map.width);
+    try std.testing.expectEqual(@as(usize, 128 * 128), map.tileCount());
+}
+
+test "Map large size allocates and accesses corners" {
+    // 512×512 = 262 144 tiles — exercises the larger-than-64k path.
+    var map = try Map.init(std.testing.allocator, 512, 512);
+    defer map.deinit();
+
+    try std.testing.expectEqual(@as(usize, 512 * 512), map.tileCount());
+
+    // Corner access wraps correctly on a large map.
+    const corner = MapPos{ .x = 511, .y = 511 };
+    map.getTile(corner).terrain = .snow;
+    try std.testing.expectEqual(Terrain.snow, map.getTileXY(511, 511).terrain);
+
+    // Wrapping at the far edge lands on column/row 0.
+    try std.testing.expectEqual(@as(u16, 0), map.wrapX(512));
+    try std.testing.expectEqual(@as(u16, 0), map.wrapY(512));
 }
