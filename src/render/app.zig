@@ -233,6 +233,11 @@ pub const App = struct {
     /// advances (a building could be constructed/removed, making cached
     /// bidx values stale).
     last_tick: u64 = 0,
+    /// Persistent scratch buffers for renderMapObjects/renderBuildings, used
+    /// when the stack buffer overflows (zoomed-out large maps). Reused across
+    /// frames to avoid mmap/munmap per frame from page_allocator.
+    obj_scratch: []SceneItem = &.{},
+    bld_scratch: []BldEntry = &.{},
 
 
     pub fn init(allocator: std.mem.Allocator, map_w: u16, map_h: u16, opts: AppOptions) !App {
@@ -292,6 +297,8 @@ pub const App = struct {
         if (self.cull_visited.len > 0) self.allocator.free(self.cull_visited);
         if (self.obj_cache_items.len > 0) self.allocator.free(self.obj_cache_items);
         if (self.bld_cache_items.len > 0) self.allocator.free(self.bld_cache_items);
+        if (self.obj_scratch.len > 0) self.allocator.free(self.obj_scratch);
+        if (self.bld_scratch.len > 0) self.allocator.free(self.bld_scratch);
         self.game.deinit();
     }
 
@@ -710,12 +717,16 @@ pub const App = struct {
             break :blk rs * cs;
         };
         var list: []SceneItem = stack_buf[0..];
-        var heap_list: ?[]SceneItem = null;
+        // Fall back to a persistent scratch buffer (reused across frames) when
+        // the visible tile count exceeds the stack capacity. This avoids
+        // mmap/munmap per frame from page_allocator.
         if (visible_tile_count > stack_buf.len) {
-            heap_list = std.heap.page_allocator.alloc(SceneItem, visible_tile_count) catch null;
-            if (heap_list) |hl| list = hl;
+            if (self.obj_scratch.len < visible_tile_count) {
+                if (self.obj_scratch.len > 0) self.allocator.free(self.obj_scratch);
+                self.obj_scratch = self.allocator.alloc(SceneItem, visible_tile_count) catch &.{};
+            }
+            if (self.obj_scratch.len >= visible_tile_count) list = self.obj_scratch;
         }
-        defer if (heap_list) |hl| std.heap.page_allocator.free(hl);
 
         var n: usize = 0;
         var it = num_visible;
@@ -796,12 +807,16 @@ pub const App = struct {
         // fall back to heap for pathological counts.
         var stack_buf: [1024]BldEntry = undefined;
         var list: []BldEntry = stack_buf[0..];
-        var heap_list: ?[]BldEntry = null;
+        // Fall back to a persistent scratch buffer (reused across frames) when
+        // the building count exceeds the stack capacity. This avoids
+        // mmap/munmap per frame from page_allocator.
         if (items.len > stack_buf.len) {
-            heap_list = std.heap.page_allocator.alloc(BldEntry, items.len) catch null;
-            if (heap_list) |hl| list = hl;
+            if (self.bld_scratch.len < items.len) {
+                if (self.bld_scratch.len > 0) self.allocator.free(self.bld_scratch);
+                self.bld_scratch = self.allocator.alloc(BldEntry, items.len) catch &.{};
+            }
+            if (self.bld_scratch.len >= items.len) list = self.bld_scratch;
         }
-        defer if (heap_list) |hl| std.heap.page_allocator.free(hl);
 
         var n: usize = 0;
         for (items, 0..) |*bld, i| {
