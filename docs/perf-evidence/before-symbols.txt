@@ -1,0 +1,30 @@
+    96.55%     0.00%  freeserf      freeserf                       [.] _start
+    96.55%     0.00%  freeserf      libc.so.6                      [.] __libc_start_main_impl (inlined)
+    96.55%     0.00%  freeserf      libc.so.6                      [.] call_init (inlined)
+    96.55%     0.00%  freeserf      libc.so.6                      [.] __libc_start_call_main
+    96.55%     0.00%  freeserf      freeserf                       [.] main (inlined)
+    96.55%     0.00%  freeserf      freeserf                       [.] callMainWithArgs (inlined)
+    96.55%     0.00%  freeserf      freeserf                       [.] callMain (inlined)
+    96.55%     0.00%  freeserf      freeserf                       [.] wrapMain (inlined)
+    96.55%     0.00%  freeserf      freeserf                       [.] main.main
+    96.55%     0.00%  freeserf      freeserf                       [.] main.runGlfwDemo
+    96.55%     0.00%  freeserf      freeserf                       [.] app.App.run
+    58.69%    50.38%  freeserf      freeserf                       [.] sprite_batcher.SpriteBatcher.add
+    54.60%     0.00%  freeserf      freeserf                       [.] app.App.renderMapObjects
+    40.66%     0.00%  freeserf      freeserf                       [.] app.App.drawMapObject
+    30.65%     0.00%  freeserf      freeserf                       [.] app.App.drawShadowedSprite
+    25.53%     0.00%  freeserf      freeserf                       [.] app.addSprite
+    23.15%     4.21%  freeserf      freeserf                       [.] ui.Panel.Panel.draw
+    23.15%     0.00%  freeserf      freeserf                       [.] app.App.renderUI
+    18.52%     0.00%  freeserf      freeserf                       [.] glfw.swapBuffers
+    18.52%     0.00%  freeserf      libGLX_mesa.so.0.0.0           [.] 0x00007158c49aaf5d
+    18.52%     0.00%  freeserf      libGLX_mesa.so.0.0.0           [.] 0x00007158c49b90f5
+    18.52%     0.00%  freeserf      libgallium-26.0.3-1ubuntu1.so  [.] loader_dri3_swap_buffers_msc
+    14.29%     0.00%  freeserf      libgallium-26.0.3-1ubuntu1.so  [.] dri_flush
+    14.29%     0.00%  freeserf      libgallium-26.0.3-1ubuntu1.so  [.] 0x00007158c1e1f2e5
+    14.29%     0.00%  freeserf      libgallium-26.0.3-1ubuntu1.so  [.] 0x00007158c24c33bf
+    10.01%     0.00%  freeserf      freeserf                       [.] Font.Font.drawFmt__anon_37829
+    10.01%     0.00%  freeserf      freeserf                       [.] Font.Font.drawText
+    10.01%     0.00%  freeserf      freeserf                       [.] texture_atlas.TextureAtlas.has
+    10.01%     0.00%  freeserf      freeserf                       [.] hash_map.HashMap(u16,texture_atlas.AtlasEntry,hash_map.AutoContext(u16),80).contains
+    10.01%     0.00%  freeserf      freeserf                       [.] hash_map.Custom(u16,texture_atlas.AtlasEntry,hash_map.AutoContext(u16),80).containsContext

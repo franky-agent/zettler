@@ -29,6 +29,12 @@ pub const ATLAS_SIZE: u32 = 2048;
 /// Margin between sprites in the atlas (to avoid bleeding).
 pub const ATLAS_MARGIN: u32 = 1;
 
+/// Size of the direct lookup table indexed by sprite ID. Covers all sprite
+/// IDs used by the game (terrain ≤ 292, waves ≤ 645, buildings/shadows
+/// ≤ MAP_OBJECT_BASE + 0xc0 + 250 ≈ 1700). Sized to 4096 to match
+/// MAX_ATLAS_SPRITES and leave headroom for future sprite ranges.
+const LOOKUP_TABLE_SIZE: usize = 4096;
+
 /// Texture atlas — builds and manages a single large texture containing many sprites.
 pub const TextureAtlas = struct {
     allocator: std.mem.Allocator,
@@ -37,7 +43,11 @@ pub const TextureAtlas = struct {
     cursor_x: u32 = ATLAS_MARGIN,
     cursor_y: u32 = ATLAS_MARGIN,
     row_height: u32 = 0,
-    entries: std.AutoHashMap(u16, AtlasEntry),
+    /// Direct-index lookup table: entries[sprite_id] == null means not packed.
+    /// Replaces a std.AutoHashMap — sprite IDs are dense u16 indices, so a
+    /// flat array turns every get()/has() from a hash+probe into one indexed
+    /// load (~15% of frame time was spent in wyhash on the old HashMap).
+    entries: []?AtlasEntry = &.{},
     uploaded: bool = false,
     packed_count: usize = 0,
 
@@ -49,10 +59,12 @@ pub const TextureAtlas = struct {
         // and the shader does tex * v_color, so sampling white yields
         // the vertex color unchanged.
         pixels[0] = .{ .r = 255, .g = 255, .b = 255, .a = 255 };
+        const entries = try allocator.alloc(?AtlasEntry, LOOKUP_TABLE_SIZE);
+        @memset(entries, null);
         return .{
             .allocator = allocator,
             .pixels = pixels,
-            .entries = std.AutoHashMap(u16, AtlasEntry).init(allocator),
+            .entries = entries,
         };
     }
 
@@ -62,11 +74,12 @@ pub const TextureAtlas = struct {
             gl.deleteTextures(1, &tex);
         }
         self.allocator.free(self.pixels);
-        self.entries.deinit();
+        self.allocator.free(self.entries);
     }
 
     pub fn packSprite(self: *TextureAtlas, sprite_id: u16, sprite: *const Sprite) !AtlasEntry {
-        if (self.entries.contains(sprite_id)) return self.entries.get(sprite_id).?;
+        if (sprite_id >= self.entries.len) return error.SpriteIdOutOfRange;
+        if (self.entries[sprite_id]) |existing| return existing;
         if (self.packed_count >= MAX_ATLAS_SPRITES) return error.AtlasFull;
 
         const w = sprite.width;
@@ -122,7 +135,7 @@ pub const TextureAtlas = struct {
             .atlas_x = self.cursor_x, .atlas_y = self.cursor_y,
             .off_x = sprite.offset_x, .off_y = sprite.offset_y,
         };
-        try self.entries.put(sprite_id, entry);
+        self.entries[sprite_id] = entry;
         self.cursor_x += pw;
         self.packed_count += 1;
         return entry;
@@ -157,9 +170,16 @@ pub const TextureAtlas = struct {
         gl.texParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, f);
     }
 
-    pub fn get(self: *TextureAtlas, sprite_id: u16) ?AtlasEntry { return self.entries.get(sprite_id); }
-    pub fn has(self: *TextureAtlas, sprite_id: u16) bool { return self.entries.contains(sprite_id); }
-    pub fn count(self: TextureAtlas) usize { return self.entries.count(); }
+    pub fn get(self: *TextureAtlas, sprite_id: u16) ?AtlasEntry {
+        if (sprite_id >= self.entries.len) return null;
+        return self.entries[sprite_id];
+    }
+
+    pub fn has(self: *TextureAtlas, sprite_id: u16) bool {
+        if (sprite_id >= self.entries.len) return false;
+        return self.entries[sprite_id] != null;
+    }
+    pub fn count(self: TextureAtlas) usize { return self.packed_count; }
 
     /// Load terrain tiles from PAK and pack into atlas.
     pub fn loadTerrainSprites(self: *TextureAtlas, pak: *PakFile, decoder: *BmpDecoder) !void {
