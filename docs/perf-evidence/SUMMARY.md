@@ -70,20 +70,10 @@ when the camera is idle (fix #3), and avoid `idiv` on interior tiles (fix #4).
 ## Rendering correctness — screenshots
 
 All screenshots captured with `--map-size 256 256 --seed 1` on Xvfb `:99`.
-
-| file | description |
-|------|-------------|
-| `docs/perf-evidence/before-screenshot.png` | baseline (unmodified) |
-| `docs/perf-evidence/after-fix1-screenshot.png` | after atlas array fix |
-| `docs/perf-evidence/after-fix2-screenshot.png` | after bulk vertex write |
-| `docs/perf-evidence/after-fix3-screenshot.png` | after sort cache |
-| `docs/perf-evidence/after-fix4-screenshot.png` | after wrap fast path |
-| `docs/perf-evidence/after-fix5-screenshot.png` | after scratch buffers |
-| `docs/perf-evidence/after-fix5-1024x1024-screenshot.png` | 1024×1024 map (exercises scratch buffer fallback) |
-
-All screenshots are pixel-identical (same seed → same terrain → same sprite
-placement). The 1024×1024 screenshot confirms the scratch buffer fallback
-path works on maps that exceed the 4096-tile stack buffer.
+Screenshots are posted as a PR comment (binary files are not committed to
+the repo). All screenshots are pixel-identical (same seed → same terrain →
+same sprite placement). The 1024×1024 screenshot confirms the scratch buffer
+fallback path works on maps that exceed the 4096-tile stack buffer.
 
 ## Changes by file
 
