@@ -68,10 +68,12 @@ pub const Camera = struct {
         return .{ .x = wx, .y = wy };
     }
 
-    /// Returns the world-space rectangle visible through this camera as
-    /// `(min_x, min_y, max_x, max_y)`. Used for viewport culling: only tiles
-    /// whose world position falls inside this rectangle can be on screen.
-    pub fn visibleWorldBounds(self: Camera) struct { min_x: f32, min_y: f32, max_x: f32, max_y: f32 } {
+    /// Returns the world-space rectangle visible through this camera.
+    /// Used for viewport culling: only tiles whose world position falls
+    /// inside this rectangle can be on screen. Returns the shared
+    /// `WorldBounds` type so callers can store it in struct fields without
+    /// anonymous-struct type mismatches.
+    pub fn visibleWorldBounds(self: Camera) @import("app.zig").WorldBounds {
         const half_w = self.viewport_w / (2.0 * self.zoom);
         const half_h = self.viewport_h / (2.0 * self.zoom);
         return .{

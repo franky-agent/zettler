@@ -77,6 +77,22 @@ pub fn initFallbackTexture() void {
 
 const MapObject = core.map.MapObject;
 
+/// World-space rectangle visible through the camera. Shared named type so the
+/// sort-cache fields in `App` and `Camera.visibleWorldBounds` use the same
+/// struct identity (Zig treats anonymous structs as distinct types).
+pub const WorldBounds = struct {
+    min_x: f32,
+    min_y: f32,
+    max_x: f32,
+    max_y: f32,
+};
+
+/// A sorted building entry for the render sort cache.
+const BldEntry = struct {
+    baseline: f32,
+    bidx: u32,
+};
+
 /// AssetMapObject sprite ids for harvestable map objects: trees (offsets 0-15:
 /// deciduous 0-7, pine 8-15) and rocks (offsets 64-71).
 fn mapObjectSpriteIds() [24]u16 {
@@ -201,6 +217,24 @@ pub const App = struct {
     /// Allocated once in initGL; cleared each frame by `visibleTiles`.
     cull_visited: []u8 = &.{},
 
+    /// --- Sort cache for renderMapObjects / renderBuildings ---
+    /// The sort baseline (pos.y * tile_h - height_scale * height) depends only
+    /// on tile data, not the camera. The camera only determines *which* tiles
+    /// are visible. So we cache the sorted list and reuse it when the visible
+    /// world bounds haven't changed since the last frame (camera idle). The
+    /// cache is invalidated by any camera pan/zoom.
+    obj_cache_valid: bool = false,
+    obj_cache_bounds: WorldBounds = .{ .min_x = 0, .min_y = 0, .max_x = 0, .max_y = 0 },
+    obj_cache_items: []SceneItem = &.{},
+    bld_cache_valid: bool = false,
+    bld_cache_bounds: WorldBounds = .{ .min_x = 0, .min_y = 0, .max_x = 0, .max_y = 0 },
+    bld_cache_items: []BldEntry = &.{},
+    /// Last game tick seen — used to invalidate sort caches when the tick
+    /// advances (a building could be constructed/removed, making cached
+    /// bidx values stale).
+    last_tick: u64 = 0,
+
+
     pub fn init(allocator: std.mem.Allocator, map_w: u16, map_h: u16, opts: AppOptions) !App {
         var game_state = try Game.init(allocator, map_w, map_h, 1, .{
             .seed = opts.seed,
@@ -256,6 +290,8 @@ pub const App = struct {
         self.map_renderer.deinit();
         self.shader.deinit();
         if (self.cull_visited.len > 0) self.allocator.free(self.cull_visited);
+        if (self.obj_cache_items.len > 0) self.allocator.free(self.obj_cache_items);
+        if (self.bld_cache_items.len > 0) self.allocator.free(self.bld_cache_items);
         self.game.deinit();
     }
 
@@ -521,6 +557,18 @@ pub const App = struct {
             const const_tick: u64 = @intFromFloat(glfw.getTime() * 50.0);
             self.game.tick(const_tick);
 
+            // Invalidate the render sort caches when the game tick advances —
+            // a building could be constructed or removed, making cached bidx
+            // values stale. The cache is only a win when the camera is idle;
+            // when the tick changes (every ~20ms) we re-sort, which is still
+            // far cheaper than the old per-frame sort because the tile
+            // iteration is skipped when the camera bounds also match.
+            if (const_tick != self.last_tick) {
+                self.obj_cache_valid = false;
+                self.bld_cache_valid = false;
+                self.last_tick = const_tick;
+            }
+
             gl.clear(gl.GL_COLOR_BUFFER_BIT);
 
             // Render the hex map — NEAREST for pixel-exact fidelity to the
@@ -625,6 +673,24 @@ pub const App = struct {
         // camera, instead of the entire map. The iterator handles torus
         // wrapping, so a single pass covers the visible area (no 3×3 loop).
         const b = cam.visibleWorldBounds();
+
+        // --- Sort cache: skip tile iteration + sort when camera is idle ---
+        // The baseline depends only on tile y + height (not camera position),
+        // so the sorted order is identical when the visible bounds match.
+        const bounds_match = self.obj_cache_valid and
+            b.min_x == self.obj_cache_bounds.min_x and
+            b.min_y == self.obj_cache_bounds.min_y and
+            b.max_x == self.obj_cache_bounds.max_x and
+            b.max_y == self.obj_cache_bounds.max_y;
+        if (bounds_match) {
+            // Reuse the cached sorted list — no iteration, no sort.
+            for (self.obj_cache_items) |e| {
+                self.drawMapObject(batcher, e.x, e.y, tw, th, hw);
+            }
+            batcher.render(&self.shader, tex, cam);
+            return;
+        }
+
         const num_visible = culling_mod.visibleTiles(
             b.min_x, b.min_y, b.max_x, b.max_y, map.*, self.cull_visited,
         );
@@ -674,6 +740,18 @@ pub const App = struct {
             self.drawMapObject(batcher, e.x, e.y, tw, th, hw);
         }
 
+        // Cache the sorted list for reuse on the next frame if the camera
+        // hasn't moved. Copy into a persistent heap buffer.
+        if (self.obj_cache_items.len < n) {
+            if (self.obj_cache_items.len > 0) self.allocator.free(self.obj_cache_items);
+            self.obj_cache_items = self.allocator.alloc(SceneItem, n) catch &.{};
+        }
+        if (self.obj_cache_items.len >= n and n > 0) {
+            @memcpy(self.obj_cache_items[0..n], list[0..n]);
+            self.obj_cache_bounds = b;
+            self.obj_cache_valid = true;
+        }
+
         batcher.render(&self.shader, tex, cam);
     }
 
@@ -696,21 +774,35 @@ pub const App = struct {
         self.setupAutoFlush(batcher, tex);
         batcher.begin();
 
+        const b = cam.visibleWorldBounds();
+
+        // --- Sort cache: skip re-collect + sort when camera is idle ---
+        const bounds_match = self.bld_cache_valid and
+            b.min_x == self.bld_cache_bounds.min_x and
+            b.min_y == self.bld_cache_bounds.min_y and
+            b.max_x == self.bld_cache_bounds.max_x and
+            b.max_y == self.bld_cache_bounds.max_y;
+        if (bounds_match) {
+            for (self.bld_cache_items) |e| {
+                self.drawBuilding(batcher, &items[e.bidx], tw, th, hw);
+            }
+            batcher.render(&self.shader, tex, cam);
+            return;
+        }
+
         // Viewport culling: skip buildings whose tile is outside the visible
         // world bounds. Buildings are few, so we just filter — no tile
         // iterator needed. Use a stack buffer for up to 1024 buildings;
         // fall back to heap for pathological counts.
-        var stack_buf: [1024]struct { baseline: f32, bidx: u32 } = undefined;
-        const EntryType = @TypeOf(stack_buf[0]);
-        var list: []EntryType = stack_buf[0..];
-        var heap_list: ?[]EntryType = null;
+        var stack_buf: [1024]BldEntry = undefined;
+        var list: []BldEntry = stack_buf[0..];
+        var heap_list: ?[]BldEntry = null;
         if (items.len > stack_buf.len) {
-            heap_list = std.heap.page_allocator.alloc(EntryType, items.len) catch null;
+            heap_list = std.heap.page_allocator.alloc(BldEntry, items.len) catch null;
             if (heap_list) |hl| list = hl;
         }
         defer if (heap_list) |hl| std.heap.page_allocator.free(hl);
 
-        const b = cam.visibleWorldBounds();
         var n: usize = 0;
         for (items, 0..) |*bld, i| {
             if (n >= list.len) break;
@@ -728,13 +820,24 @@ pub const App = struct {
             };
             n += 1;
         }
-        std.mem.sort(EntryType, list[0..n], {}, struct {
-            fn lt(_: void, p: EntryType, q: EntryType) bool {
+        std.mem.sort(BldEntry, list[0..n], {}, struct {
+            fn lt(_: void, p: BldEntry, q: BldEntry) bool {
                 return p.baseline < q.baseline;
             }
         }.lt);
         for (list[0..n]) |e| {
             self.drawBuilding(batcher, &items[e.bidx], tw, th, hw);
+        }
+
+        // Cache the sorted list for reuse on the next frame.
+        if (self.bld_cache_items.len < n) {
+            if (self.bld_cache_items.len > 0) self.allocator.free(self.bld_cache_items);
+            self.bld_cache_items = self.allocator.alloc(BldEntry, n) catch &.{};
+        }
+        if (self.bld_cache_items.len >= n and n > 0) {
+            @memcpy(self.bld_cache_items[0..n], list[0..n]);
+            self.bld_cache_bounds = b;
+            self.bld_cache_valid = true;
         }
 
         batcher.render(&self.shader, tex, cam);
