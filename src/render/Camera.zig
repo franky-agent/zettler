@@ -12,6 +12,17 @@ const core = @import("core");
 const Vec2f = core.Vec2f;
 const Mat4 = core.Mat4;
 
+/// World-space rectangle visible through the camera. Shared named type so
+/// callers can store it in struct fields without anonymous-struct identity
+/// mismatches. Defined here (in the leaf Camera module) to avoid a circular
+/// dependency: app.zig imports Camera, not the other way around.
+pub const WorldBounds = struct {
+    min_x: f32,
+    min_y: f32,
+    max_x: f32,
+    max_y: f32,
+};
+
 /// 2D camera for the game.
 pub const Camera = struct {
     /// Camera position in world space (tiles).
@@ -73,7 +84,7 @@ pub const Camera = struct {
     /// inside this rectangle can be on screen. Returns the shared
     /// `WorldBounds` type so callers can store it in struct fields without
     /// anonymous-struct type mismatches.
-    pub fn visibleWorldBounds(self: Camera) @import("app.zig").WorldBounds {
+    pub fn visibleWorldBounds(self: Camera) WorldBounds {
         const half_w = self.viewport_w / (2.0 * self.zoom);
         const half_h = self.viewport_h / (2.0 * self.zoom);
         return .{

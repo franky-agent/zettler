@@ -77,15 +77,9 @@ pub fn initFallbackTexture() void {
 
 const MapObject = core.map.MapObject;
 
-/// World-space rectangle visible through the camera. Shared named type so the
-/// sort-cache fields in `App` and `Camera.visibleWorldBounds` use the same
-/// struct identity (Zig treats anonymous structs as distinct types).
-pub const WorldBounds = struct {
-    min_x: f32,
-    min_y: f32,
-    max_x: f32,
-    max_y: f32,
-};
+/// Re-export WorldBounds from Camera (the leaf module) so app.zig can use it
+/// in struct fields without a circular @import.
+const WorldBounds = camera_mod.WorldBounds;
 
 /// A sorted building entry for the render sort cache.
 const BldEntry = struct {
@@ -752,13 +746,14 @@ pub const App = struct {
         }
 
         // Cache the sorted list for reuse on the next frame if the camera
-        // hasn't moved. Copy into a persistent heap buffer.
-        if (self.obj_cache_items.len < n) {
+        // hasn't moved. Copy into a persistent heap buffer. Also cache empty
+        // results (n == 0) so we don't re-iterate every frame on an empty view.
+        if (n > 0 and self.obj_cache_items.len < n) {
             if (self.obj_cache_items.len > 0) self.allocator.free(self.obj_cache_items);
             self.obj_cache_items = self.allocator.alloc(SceneItem, n) catch &.{};
         }
-        if (self.obj_cache_items.len >= n and n > 0) {
-            @memcpy(self.obj_cache_items[0..n], list[0..n]);
+        if (self.obj_cache_items.len >= n) {
+            if (n > 0) @memcpy(self.obj_cache_items[0..n], list[0..n]);
             self.obj_cache_bounds = b;
             self.obj_cache_valid = true;
         }
@@ -844,13 +839,15 @@ pub const App = struct {
             self.drawBuilding(batcher, &items[e.bidx], tw, th, hw);
         }
 
-        // Cache the sorted list for reuse on the next frame.
-        if (self.bld_cache_items.len < n) {
+        // Cache the sorted list for reuse on the next frame. Also cache
+        // empty results (n == 0) so we don't re-iterate every frame on an
+        // empty view.
+        if (n > 0 and self.bld_cache_items.len < n) {
             if (self.bld_cache_items.len > 0) self.allocator.free(self.bld_cache_items);
             self.bld_cache_items = self.allocator.alloc(BldEntry, n) catch &.{};
         }
-        if (self.bld_cache_items.len >= n and n > 0) {
-            @memcpy(self.bld_cache_items[0..n], list[0..n]);
+        if (self.bld_cache_items.len >= n) {
+            if (n > 0) @memcpy(self.bld_cache_items[0..n], list[0..n]);
             self.bld_cache_bounds = b;
             self.bld_cache_valid = true;
         }
