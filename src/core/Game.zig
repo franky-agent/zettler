@@ -12,6 +12,8 @@ const Map = @import("Map.zig").Map;
 const Terrain = @import("Map.zig").Terrain;
 const PlayerState = @import("PlayerState.zig").PlayerState;
 const PlayerStates = @import("PlayerState.zig").PlayerStates;
+const PlayerManager = @import("Player.zig").PlayerManager;
+const SpawnKind = @import("Player.zig").SpawnKind;
 const BuildingState = @import("BuildingState.zig").BuildingState;
 const BuildingManager = @import("Building.zig").BuildingManager;
 const FlagState = @import("FlagState.zig").FlagState;
@@ -360,8 +362,179 @@ pub const Game = struct {
     fn updateSerfs(_: *Game, _: u64) void {
     }
 
-    /// Update all players (AI + resource balancing).
-    fn updatePlayers(_: *Game, _: u64) void {
+    /// Update all players — per-tick player economy logic.
+    ///
+    /// For each active player this:
+    /// 1. Recounts buildings into `building_count[]` and sets `has_castle`.
+    /// 2. Advances the reproduction counter and spawns serfs/knights.
+    /// 3. Runs the emergency program (cancel non-essential transports when the
+    ///    lumberjack/sawmill/stonecutter chain is broken).
+    /// 4. Distributes input resources from the player's stock out to processing
+    ///    buildings' flags (so `updateInventories` Pass 2 can pull them in).
+    ///    The destination is chosen by per-resource distribution priorities.
+    fn updatePlayers(self: *Game, game_tick: u64) void {
+        const players = &self.state.players;
+
+        var pi: u8 = 0;
+        while (pi < players.player_count) : (pi += 1) {
+            const player = &players.players[pi];
+
+            // (1) Recount buildings and detect a castle/stock.
+            recountBuildings(self, pi);
+
+            // (2) Reproduction. One tick per update; the Game layer owns serf
+            // creation because it needs the allocator and the serf array.
+            const spawn = PlayerManager.updateReproduction(player, 1);
+            switch (spawn) {
+                .serf => self.spawnSerfFor(pi, .generic) catch {},
+                .knight => self.spawnSerfFor(pi, .knight_0) catch {},
+                .none => {},
+            }
+
+            // (3) Emergency program.
+            updateEmergencyProgram(self, pi);
+
+            // (4) Distribute input resources from stock to processing buildings.
+            // One unit per resource per tick, sent to the highest-priority
+            // building that still needs it.
+            distributeStockToBuildings(self, pi);
+
+            _ = game_tick; // available for future rate-gated work
+        }
+    }
+
+    /// Recompute `player.building_count[]` from the live building list and set
+    /// `has_castle` if the player owns at least one finished stock building.
+    fn recountBuildings(self: *Game, player_index: u8) void {
+        const player = &self.state.players.players[player_index];
+        @memset(&player.building_count, 0);
+        player.has_castle = false;
+        for (self.state.buildings.buildings.items) |*b| {
+            if (b.player != player_index) continue;
+            player.building_count[@intFromEnum(b.building_type)] += 1;
+            if (b.building_type == .stock and b.is_done) player.has_castle = true;
+        }
+    }
+
+    /// Spawn a serf of the given type for `player_index` at that player's first
+    /// stock building (or origin if none). Mirrors the C# `SpawnSerf` path.
+    fn spawnSerfFor(self: *Game, player_index: u8, serf_type: SerfType) !void {
+        var pos = MapPos.zero;
+        for (self.state.buildings.buildings.items) |*b| {
+            if (b.player == player_index and b.building_type == .stock and b.is_done) {
+                pos = b.pos;
+                break;
+            }
+        }
+        const serf = SerfStateData{
+            .pos = pos,
+            .serf_type = serf_type,
+            .player = player_index,
+            .state = .idle_in_stock,
+        };
+        _ = try self.state.serfs.add(self.allocator, serf);
+        self.state.players.players[player_index].serf_count[@intFromEnum(serf_type)] +|= 1;
+    }
+
+    /// Emergency program: if the player has no working
+    /// lumberjack/sawmill/stonecutter and too few planks/stone to rebuild one,
+    /// flag `emergency_program_active` so future transports can be cancelled.
+    /// (Cancellation of in-flight transports is a stub for now — the flag is
+    /// what downstream tasks 2p.4/2p.5 will consult.)
+    fn updateEmergencyProgram(self: *Game, player_index: u8) void {
+        const player = &self.state.players.players[player_index];
+
+        const has_lumberjack = player.building_count[@intFromEnum(Building.lumberjack)] > 0;
+        const has_sawmill = player.building_count[@intFromEnum(Building.sawmill)] > 0;
+        const has_stonecutter = player.building_count[@intFromEnum(Building.stonecutter)] > 0;
+
+        if (has_lumberjack and has_sawmill and has_stonecutter) {
+            player.emergency_program_active = false;
+            return;
+        }
+
+        // Planks/stone needed to rebuild the missing essential buildings.
+        // Costs mirror `PlayerManager.constructionCost` (lumberjack/sawmill/
+        // stonecutter are the essential chain).
+        var planks_needed: u16 = 0;
+        var stone_needed: u16 = 0;
+        if (!has_lumberjack) {
+            planks_needed += 1; // lumberjack: 1 plank
+        }
+        if (!has_sawmill) {
+            planks_needed += 2; // sawmill: 2 planks, 1 stone
+            stone_needed += 1;
+        }
+        if (!has_stonecutter) {
+            planks_needed += 1; // stonecutter: 1 plank
+        }
+
+        const planks = player.resources[@intFromEnum(Resource.planks)];
+        const stone = player.resources[@intFromEnum(Resource.stone)];
+        const short_on_planks = planks < planks_needed;
+        const short_on_stone = stone < stone_needed;
+
+        if (short_on_planks or short_on_stone) {
+            player.emergency_program_active = true;
+        } else {
+            player.emergency_program_active = false;
+        }
+    }
+
+    /// Pull input resources out of the player's stock and queue them on the
+    /// flags of processing buildings that consume them. For each input
+    /// resource the highest-priority unstocked building wins one unit per tick.
+    ///
+    /// This is the reverse of `updateInventories` Pass 3 (which delivers
+    /// produced goods to stock): it keeps processing buildings fed so the
+    /// economy doesn't stall once stock runs low.
+    fn distributeStockToBuildings(self: *Game, player_index: u8) void {
+        const player = &self.state.players.players[player_index];
+        const buildings = &self.state.buildings;
+        const flags = &self.state.flags;
+        const FlagQueueCapacity = @import("FlagState.zig").FlagQueueCapacity;
+
+        // Resources that processing buildings consume and that we therefore
+        // push out from stock. (Wood is also consumed by sawmill/boatbuilder.)
+        const distributable = [_]Resource{
+            .grain, .flour, .wood, .iron_ore, .iron, .coal, .meat,
+        };
+
+        for (distributable) |res| {
+            if (player.resources[@intFromEnum(res)] == 0) continue;
+
+            // Find the consumer building with the highest priority whose flag
+            // has space and whose stock isn't already full of that resource.
+            var best_idx: ?usize = null;
+            var best_pri: u16 = 0;
+            for (buildings.buildings.items, 0..) |*b, i| {
+                if (b.player != player_index) continue;
+                if (!b.is_done or b.is_burning) continue;
+                const input = getInputResource(b.building_type) orelse continue;
+                if (input != res) continue;
+                // Don't push to a building whose local stock already holds the
+                // resource at capacity (4 slots) — it would just bounce back.
+                if (b.findStockSlot(res) != null and b.stockCount(res) >= 8) continue;
+                if (!b.flag_index.isValid()) continue;
+                const flag = flags.get(b.flag_index);
+                if (flag.incoming_count >= FlagQueueCapacity) continue;
+
+                const pri = PlayerManager.distributionPriority(player, res, b.building_type);
+                if (pri == 0) continue;
+                if (pri > best_pri) {
+                    best_pri = pri;
+                    best_idx = i;
+                }
+            }
+
+            if (best_idx) |bi| {
+                const b = &buildings.buildings.items[bi];
+                const flag = flags.get(b.flag_index);
+                flag.incoming_queue[flag.incoming_count] = @intFromEnum(res);
+                flag.incoming_count += 1;
+                player.resources[@intFromEnum(res)] -= 1;
+            }
+        }
     }
 
     /// Update inventories — move resources between buildings, flags, and the
@@ -958,4 +1131,175 @@ test "Road-connected building delivers to stock building" {
     }
 
     try std.testing.expect(game.state.players.players[0].resources[@intFromEnum(Resource.wood)] > 0);
+}
+
+test "updatePlayers recounts building counts" {
+    var game = try Game.init(std.testing.allocator, 64, 64, 1, .{ .seed = 42 });
+    defer game.deinit();
+    game.state.players.setPlayerCount(1);
+    game.state.speed = 1;
+
+    const player = &game.state.players.players[0];
+    try std.testing.expectEqual(@as(u16, 0), player.building_count[@intFromEnum(Building.lumberjack)]);
+    try std.testing.expect(!player.has_castle);
+
+    // Place a stock and a lumberjack on clear grass.
+    const stock_pos = types.MapPos{ .x = 4, .y = 5 };
+    const lj_pos = types.MapPos{ .x = 6, .y = 5 };
+    for ([_]types.MapPos{ stock_pos, lj_pos, .{ .x = 4, .y = 4 }, .{ .x = 5, .y = 4 }, .{ .x = 6, .y = 4 } }) |p| {
+        const tl = game.state.map.getTile(p);
+        tl.terrain = .grass;
+        tl.object = .none;
+    }
+    const stock_idx = (try game.placeBuilding(stock_pos, .stock, 0)).?;
+    game.state.buildings.get(stock_idx).is_done = true;
+    _ = (try game.placeBuilding(lj_pos, .lumberjack, 0)).?;
+
+    // One tick runs updatePlayers → recountBuildings.
+    game.tick(1);
+
+    try std.testing.expectEqual(@as(u16, 1), player.building_count[@intFromEnum(Building.stock)]);
+    try std.testing.expectEqual(@as(u16, 1), player.building_count[@intFromEnum(Building.lumberjack)]);
+    try std.testing.expect(player.has_castle);
+}
+
+test "updatePlayers spawns a generic serf when reproduction fires" {
+    var game = try Game.init(std.testing.allocator, 64, 64, 1, .{ .seed = 42 });
+    defer game.deinit();
+    game.state.players.setPlayerCount(1);
+    game.state.speed = 1;
+
+    // Place a finished stock so the player has a castle.
+    const stock_pos = types.MapPos{ .x = 4, .y = 5 };
+    const tl = game.state.map.getTile(stock_pos);
+    tl.terrain = .grass;
+    tl.object = .none;
+    const stock_idx = (try game.placeBuilding(stock_pos, .stock, 0)).?;
+    game.state.buildings.get(stock_idx).is_done = true;
+
+    const serfs_before = game.state.serfs.len();
+    const player = &game.state.players.players[0];
+
+    // Force a reproduction underflow on the very next tick: counter=0 minus
+    // delta=1 wraps to 65535, which is > 0, signalling an underflow.
+    player.reproduction_counter = 0;
+
+    game.tick(1);
+
+    // The reproduction cycle should have spawned one generic serf.
+    try std.testing.expectEqual(serfs_before + 1, game.state.serfs.len());
+    try std.testing.expect(player.serf_count[@intFromEnum(SerfType.generic)] >= 1);
+}
+
+test "Emergency program activates when essential chain is broken" {
+    var game = try Game.init(std.testing.allocator, 64, 64, 1, .{ .seed = 42 });
+    defer game.deinit();
+    game.state.players.setPlayerCount(1);
+    game.state.speed = 1;
+
+    const player = &game.state.players.players[0];
+    // No lumberjack/sawmill/stonecutter, and no planks/stone in stock.
+    try std.testing.expectEqual(@as(u16, 0), player.resources[@intFromEnum(Resource.planks)]);
+    try std.testing.expectEqual(@as(u16, 0), player.resources[@intFromEnum(Resource.stone)]);
+
+    game.tick(1);
+
+    try std.testing.expect(player.emergency_program_active);
+}
+
+test "Emergency program clears once the essential chain exists" {
+    var game = try Game.init(std.testing.allocator, 64, 64, 1, .{ .seed = 42 });
+    defer game.deinit();
+    game.state.players.setPlayerCount(1);
+    game.state.speed = 1;
+
+    const player = &game.state.players.players[0];
+    // Give the player a finished lumberjack, sawmill and stonecutter.
+    const positions = [_]types.MapPos{
+        .{ .x = 4, .y = 5 }, .{ .x = 6, .y = 5 }, .{ .x = 8, .y = 5 }, .{ .x = 10, .y = 5 },
+    };
+    for (positions) |p| {
+        const tl = game.state.map.getTile(p);
+        tl.terrain = .grass;
+        tl.object = .none;
+        // Also clear the down-right flag tiles so each building gets a flag.
+        const fp = p.move(.down_right);
+        if (game.state.map.isValidPos(fp)) {
+            const ft = game.state.map.getTile(fp);
+            ft.terrain = .grass;
+            ft.object = .none;
+        }
+    }
+    const types_list = [_]Building{ .stock, .lumberjack, .sawmill, .stonecutter };
+    for (positions, types_list) |p, bt| {
+        const idx = (try game.placeBuilding(p, bt, 0)).?;
+        game.state.buildings.get(idx).is_done = true;
+    }
+
+    game.tick(1);
+
+    try std.testing.expect(!player.emergency_program_active);
+}
+
+test "Stock distributes input resources to processing buildings" {
+    // A sawmill (consumes wood) with a flag. The player stock starts with
+    // wood; after a tick the wood should leave the stock and arrive on the
+    // sawmill's flag incoming queue (ready for updateInventories Pass 2).
+    var game = try Game.init(std.testing.allocator, 64, 64, 1, .{ .seed = 42 });
+    defer game.deinit();
+    game.state.players.setPlayerCount(1);
+    game.state.speed = 1;
+
+    const saw_pos = types.MapPos{ .x = 6, .y = 5 };
+    for ([_]types.MapPos{ saw_pos, .{ .x = 6, .y = 4 } }) |p| {
+        const tl = game.state.map.getTile(p);
+        tl.terrain = .grass;
+        tl.object = .none;
+    }
+    const saw_idx = (try game.placeBuilding(saw_pos, .sawmill, 0)).?;
+    game.state.buildings.get(saw_idx).is_done = true;
+    const saw_flag = game.state.buildings.get(saw_idx).flag_index;
+
+    const player = &game.state.players.players[0];
+    player.resources[@intFromEnum(Resource.wood)] = 3;
+    const wood_before = player.resources[@intFromEnum(Resource.wood)];
+
+    game.tick(1);
+
+    // One wood should have moved from the stock to the sawmill flag queue.
+    const flag = game.state.flags.get(saw_flag);
+    try std.testing.expect(flag.incoming_count > 0);
+    try std.testing.expectEqual(@as(u16, wood_before - 1), player.resources[@intFromEnum(Resource.wood)]);
+}
+
+test "Stock distribution respects priority (armory over toolmaker for iron)" {
+    // Both an armory and a toolmaker consume iron. With one iron in stock,
+    // the armory (higher priority) should receive it.
+    var game = try Game.init(std.testing.allocator, 64, 64, 1, .{ .seed = 42 });
+    defer game.deinit();
+    game.state.players.setPlayerCount(1);
+    game.state.speed = 1;
+
+    const armory_pos = types.MapPos{ .x = 4, .y = 5 };
+    const tool_pos = types.MapPos{ .x = 8, .y = 5 };
+    for ([_]types.MapPos{ armory_pos, .{ .x = 4, .y = 4 }, tool_pos, .{ .x = 8, .y = 4 } }) |p| {
+        const tl = game.state.map.getTile(p);
+        tl.terrain = .grass;
+        tl.object = .none;
+    }
+    const armory_idx = (try game.placeBuilding(armory_pos, .armory, 0)).?;
+    const tool_idx = (try game.placeBuilding(tool_pos, .toolmaker, 0)).?;
+    game.state.buildings.get(armory_idx).is_done = true;
+    game.state.buildings.get(tool_idx).is_done = true;
+    const armory_flag = game.state.buildings.get(armory_idx).flag_index;
+    const tool_flag = game.state.buildings.get(tool_idx).flag_index;
+
+    const player = &game.state.players.players[0];
+    player.resources[@intFromEnum(Resource.iron)] = 1;
+
+    game.tick(1);
+
+    // The armory flag should have received the iron, not the toolmaker.
+    try std.testing.expect(game.state.flags.get(armory_flag).incoming_count > 0);
+    try std.testing.expectEqual(@as(u8, 0), game.state.flags.get(tool_flag).incoming_count);
 }

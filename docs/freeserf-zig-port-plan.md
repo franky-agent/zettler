@@ -407,7 +407,7 @@ These modules extract assets from the original Settlers DOS data files (`SPAE.PA
 | # | Task | Files | Est. LOC | Notes |
 |---|---|---|---|---|
 | 2p.1 | **Building resource consumption** | `src/core/BuildingState.zig`, `src/core/Game.zig` | 150 | ✅ Done — buildings consume input from local stock, produce output into local stock; `updateInventories` moves resources building↔flag→player stock via road-network BFS |
-| 2p.2 | **Player resource management** | `src/core/Player.zig` (+edit) | 200 | updatePlayers() distributes resources, handles stock |
+| 2p.2 | **Player resource management** | `src/core/Player.zig` (+edit) | 200 | ✅ Done — `updatePlayers()` recounts `building_count[]`, runs serf reproduction (generic serf vs knight from sword+shield stock), runs the emergency program (flags when the lumberjack/sawmill/stonecutter chain is broken and planks/stone are short), and distributes input resources from the player stock out to processing buildings' flags by per-resource priority tables (food→mines, planks→construction, steel→armory, coal→gold smelter, wheat→pig farm, lumber→sawmill) |
 | 2p.3 | **Flag road network BFS** | `src/core/Flag.zig` (+edit) | 250 | Connect flags via roads, find nearest resource along road graph |
 | 2p.4 | **Serf assignment to buildings** | `src/core/Serf.zig` (+edit) | 300 | idle_in_stock → find unstaffed building → assign serf |
 | 2p.5 | **Serf deliver-to-building chain** | `src/core/Serf.zig` (+edit) | 300 | Walking to flag, picking up resource, delivering to building input |
